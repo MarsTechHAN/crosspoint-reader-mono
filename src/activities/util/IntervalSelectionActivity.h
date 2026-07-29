@@ -2,6 +2,9 @@
 
 #include <I18n.h>
 
+#include <functional>
+#include <utility>
+
 #include "MappedInputManager.h"
 #include "activities/Activity.h"
 #include "util/ButtonNavigator.h"
@@ -14,7 +17,8 @@ class IntervalSelectionActivity final : public Activity {
                                      StrId titleId, int initialValue, int minValue, int maxValue, int smallStep,
                                      int largeStep, StrId valueFormatId = StrId::STR_NONE_OPT,
                                      bool readerActivity = false, bool ignoreInitialConfirmRelease = false,
-                                     StrId maxBoundaryLabelId = StrId::STR_NONE_OPT)
+                                     StrId maxBoundaryLabelId = StrId::STR_NONE_OPT,
+                                     std::function<void(int)> valueChangedCallback = {}, bool commitOnBack = false)
       : Activity(activityName, renderer, mappedInput),
         titleId(titleId),
         valueFormatId(valueFormatId),
@@ -25,7 +29,9 @@ class IntervalSelectionActivity final : public Activity {
         smallStep(smallStep),
         largeStep(largeStep),
         readerActivity(readerActivity),
-        ignoreConfirmRelease(ignoreInitialConfirmRelease) {}
+        ignoreConfirmRelease(ignoreInitialConfirmRelease),
+        valueChangedCallback(std::move(valueChangedCallback)),
+        commitOnBack(commitOnBack) {}
 
   void onEnter() override;
   void loop() override;
@@ -44,9 +50,13 @@ class IntervalSelectionActivity final : public Activity {
   bool readerActivity;
   bool ignoreConfirmRelease;
   bool draggingBar = false;
+  std::function<void(int)> valueChangedCallback;
+  bool commitOnBack;
   ButtonNavigator buttonNavigator;
 
   void adjustValue(int delta);
+  void setValue(int candidate);
+  void finishFromBack();
   int clampedValue(int candidate) const;
   void drawStepHintLine(int y, StrId labelId, int step);
 };

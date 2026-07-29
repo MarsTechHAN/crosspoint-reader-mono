@@ -17,6 +17,12 @@
 #include <WiFi.h>
 #include <builtinFonts/all.h>
 
+#if FREEINK_DEVICE_PAPERMONO
+#include <PaperMonoBoard.h>
+#include <SDCardManager.h>
+#include <driver/Ssd1683Driver.h>
+#endif
+
 #include <cstring>
 
 #include "CrossPointSettings.h"
@@ -37,6 +43,14 @@
 
 GfxRenderer renderer(display);
 MappedInputManager mappedInputManager(gpio, renderer);
+
+#if FREEINK_DEVICE_PAPERMONO
+static uint8_t paperMonoPowerButtonHook() {
+  return PaperMonoBoard::pollPowerButtonClick()
+             ? static_cast<uint8_t>(1u << InputManager::BTN_POWER)
+             : 0;
+}
+#endif
 ActivityManager activityManager(renderer, mappedInputManager);
 FontDecompressor fontDecompressor;
 SdCardFontSystem sdFontSystem;
@@ -261,6 +275,11 @@ void setupDisplayAndFonts(bool seamless = false) {
 }
 
 void setup() {
+#if FREEINK_DEVICE_PAPERMONO
+  const bool paperMonoBoardReady = PaperMonoBoard::begin();
+  InputManager::setButtonHook(paperMonoPowerButtonHook);
+  SDCardManager::getInstance().setPowerHook(PaperMonoBoard::enableSd);
+#endif
   BoardConfig::holdPowerRails();
 
   t1 = millis();
@@ -280,6 +299,15 @@ void setup() {
 
   HalSystem::begin();
 
+#if FREEINK_DEVICE_PAPERMONO
+  if (!paperMonoBoardReady) {
+    LOG_ERR("MAIN", "Paper Mono M5IOE1 initialization failed");
+  } else {
+    LOG_INF("MAIN", "Paper Mono PMIC: wake=0x%02X btn_cfg=0x%02X",
+            PaperMonoBoard::wakeSource(), PaperMonoBoard::powerButtonConfig());
+  }
+#endif
+
   // Read-and-clear so a panic later in setup() doesn't loop into silent reboot.
   // Bound the target range too — RTC_NOINIT memory is uninitialized on cold boot.
   const bool isSilentReboot = (silentRebootMagic == SILENT_REBOOT_MAGIC);
@@ -293,7 +321,7 @@ void setup() {
   halTiltSensor.begin();
   halClock.begin();
 
-  LOG_INF("MAIN", "Hardware detect: %s", gpio.deviceIsX3() ? "X3" : "X4");
+  LOG_INF("MAIN", "Hardware: %s", BoardConfig::ACTIVE.name);
 
   // SD Card Initialization
   // We need 6 open files concurrently when parsing a new chapter
@@ -307,6 +335,13 @@ void setup() {
   HalSystem::checkPanic();
 
   SETTINGS.loadFromFile();
+#if FREEINK_DEVICE_PAPERMONO
+  freeink::Ssd1683GrayParams grayParams;
+  grayParams.darkFrames = SETTINGS.grayDarkFrames;
+  grayParams.lightFrames = SETTINGS.grayLightFrames;
+  freeink::ssd1683SetGrayParams(grayParams);
+  LOG_INF("MAIN", "Paper Mono gray calibration: dark=%u light=%u", grayParams.darkFrames, grayParams.lightFrames);
+#endif
   APP_STATE.loadFromFile();
   RECENT_BOOKS.loadFromFile();
   I18N.setLanguage(static_cast<Language>(SETTINGS.language));
@@ -366,6 +401,7 @@ void setup() {
                             : !APP_STATE.showBootScreen ? BootResume::QuickResume
                                                         : BootResume::Splash;
   bool allowFastInitialReaderRefresh = false;
+  bool initialActivityPaintComplete = false;
 
   setupDisplayAndFonts(resume != BootResume::Splash);
 
@@ -441,6 +477,7 @@ void setup() {
     // during boot dispatches against an invisible Home and the default
     // selectorIndex=0 opens the most-recent book.
     activityManager.requestUpdateAndWait();
+    initialActivityPaintComplete = true;
     // Absorb any button held at this point into currentState as a non-edge:
     // two gpio.update() calls separated by > InputManager's 5ms debounce
     // transition the held bit through lastDebounceTime into currentState
@@ -450,6 +487,22 @@ void setup() {
     delay(10);
     gpio.update();
   }
+
+#if FREEINK_DEVICE_PAPERMONO
+  // Paper Mono boots with its frontlight held at 0%. Wait for the initial UI
+  // paint and its direct non-flashing baseline update before bringing the
+  // light up.
+  if (!initialActivityPaintComplete) activityManager.requestUpdateAndWait();
+  LOG_INF("MAIN", "Paper Mono initial refresh complete; fading frontlight to %u%%",
+          SETTINGS.frontlightBrightness);
+  if (paperMonoBoardReady &&
+      !PaperMonoBoard::fadeFrontlightTo(SETTINGS.frontlightBrightness, 420)) {
+    LOG_ERR("MAIN", "Paper Mono frontlight fade-in failed");
+  } else if (paperMonoBoardReady) {
+    LOG_INF("MAIN", "Paper Mono frontlight ready at %u%%",
+            PaperMonoBoard::getFrontlightBrightness());
+  }
+#endif
 
   // Ensure we're not still holding the power button before leaving setup
   waitForPowerRelease();
@@ -463,6 +516,14 @@ void loop() {
 
   gpio.setSharedConfirmPowerShortPressEmitsPower(SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP);
   gpio.update();
+#if FREEINK_DEVICE_PAPERMONO
+  // Input is sampled on the main task while display work runs on the render
+  // task. Signal it at the raw edge so four-gray refinement/background cleanup
+  // can yield even before the current activity turns the gesture into a render.
+  if (gpio.wasAnyPressed() || gpio.wasAnyReleased() || gpio.wasTouchActivity()) {
+    renderer.abortDisplayWork();
+  }
+#endif
   halTiltSensor.update(SETTINGS.tiltPageTurn, SETTINGS.orientation, activityManager.isReaderActivity());
 
   renderer.setFadingFix(SETTINGS.fadingFix);
@@ -500,6 +561,15 @@ void loop() {
 
   static bool screenshotButtonsReleased = true;
   static bool screenshotComboActive = false;
+#if FREEINK_DEVICE_PAPERMONO
+  // The board hook emits POWER only after the PMIC has classified and released
+  // a short click. Act on that edge immediately; a physical long hold never
+  // reaches this path and remains reserved for PMIC download mode.
+  if (millis() >= allowSleepAt && gpio.wasPressed(HalGPIO::BTN_POWER)) {
+    enterDeepSleep();
+    return;
+  }
+#endif
   if (gpio.isPressed(HalGPIO::BTN_POWER) && gpio.isPressed(HalGPIO::BTN_DOWN)) {
     screenshotComboActive = true;
     if (screenshotButtonsReleased) {
@@ -530,6 +600,7 @@ void loop() {
     return;
   }
 
+#if !FREEINK_DEVICE_PAPERMONO
   if (millis() >= allowSleepAt && gpio.isPressed(HalGPIO::BTN_POWER) &&
       gpio.getPowerButtonHeldTime() > SETTINGS.getPowerButtonDuration()) {
     // If the screenshot combination is potentially being pressed, don't sleep
@@ -540,6 +611,7 @@ void loop() {
     // This should never be hit as `enterDeepSleep` calls esp_deep_sleep_start
     return;
   }
+#endif
 
   // Refresh screen when power button is short-pressed with FORCE_REFRESH setting.
   if (SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::FORCE_REFRESH &&

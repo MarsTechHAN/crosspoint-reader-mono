@@ -7,6 +7,10 @@
 #include <XteinkDetect.h>
 #include <esp_sleep.h>
 
+#if FREEINK_DEVICE_PAPERMONO
+#include <PaperMonoBoard.h>
+#endif
+
 // Global HalGPIO instance
 HalGPIO gpio;
 
@@ -366,6 +370,9 @@ bool HalGPIO::isUsbConnected() const {
 }
 
 HalGPIO::WakeupReason HalGPIO::getWakeupReason() const {
+#if FREEINK_DEVICE_PAPERMONO
+  if (PaperMonoBoard::wokeByPowerButton()) return WakeupReason::PowerButton;
+#endif
   const auto wakeupCause = esp_sleep_get_wakeup_cause();
   const auto resetReason = esp_reset_reason();
 

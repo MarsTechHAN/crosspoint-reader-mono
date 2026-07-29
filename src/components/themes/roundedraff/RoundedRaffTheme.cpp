@@ -356,6 +356,10 @@ void RoundedRaffTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, 
   if (gpio.hasTouch()) {
     return;
   }
+  if (gpio.deviceIsPaperMono()) {
+    drawPaperMonoButtonHints(renderer, btn1, btn2, btn3, btn4);
+    return;
+  }
 
   const GfxRenderer::Orientation origOrientation = renderer.getOrientation();
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);

@@ -1,0 +1,8 @@
+# Paper Mono always boots the USB-flashed image at 0x10000. There is no
+# otadata or alternate app partition, so stale OTA state cannot select an old
+# firmware image. Keep the existing SPIFFS offset to avoid moving user data.
+# Name,   Type, SubType, Offset,  Size, Flags
+nvs,      data, nvs,     0x9000,  0x5000,
+app0,     app,  factory, 0x10000, 0x640000,
+spiffs,   data, spiffs,  0xc90000,0x360000,
+coredump, data, coredump,0xFF0000,0x10000,

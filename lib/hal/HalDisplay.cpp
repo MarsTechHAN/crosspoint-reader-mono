@@ -18,6 +18,14 @@ void HalDisplay::begin(bool seamless) {
 
   einkDisplay.begin();
 
+#if FREEINK_DEVICE_PAPERMONO
+  // Paper Mono always establishes its first controller baseline with the
+  // driver's direct non-flashing absolute update. Do not promote the first
+  // frame to an OTP full refresh for any wake reason.
+  einkDisplay.skipInitialResync();
+  return;
+#endif
+
   if (seamless) {
     // Defuse the SDK's X3 _x3InitialFullSyncsRemaining counter (no-op on X4)
     // so the first paint isn't promoted to FULL (~770ms). Skips the wakeup-
@@ -77,6 +85,12 @@ void HalDisplay::waitRefreshComplete() { einkDisplay.waitRefreshComplete(); }
 
 bool HalDisplay::supportsAsyncRefresh() const { return einkDisplay.supportsAsyncRefresh(); }
 
+void HalDisplay::abortPostRefresh() { einkDisplay.abortPostRefresh(); }
+
+bool HalDisplay::postRefreshAborted() const { return einkDisplay.postRefreshAborted(); }
+
+void HalDisplay::runMaintenance() { einkDisplay.runMaintenance(); }
+
 void HalDisplay::refreshDisplay(HalDisplay::RefreshMode mode, bool turnOffScreen) {
   if (gpio.deviceIsX3() && mode == RefreshMode::HALF_REFRESH) {
     einkDisplay.requestResync(1);
@@ -125,6 +139,10 @@ void HalDisplay::copyGrayscaleMsbBuffers(const uint8_t* msbBuffer) { einkDisplay
 void HalDisplay::cleanupGrayscaleBuffers(const uint8_t* bwBuffer) { einkDisplay.cleanupGrayscaleBuffers(bwBuffer); }
 
 void HalDisplay::displayGrayBuffer(bool turnOffScreen) { einkDisplay.displayGrayBuffer(turnOffScreen); }
+
+void HalDisplay::displayGrayCalibration(uint16_t customX, uint16_t customY, uint16_t customW, uint16_t customH) {
+  einkDisplay.displayGrayCalibration(customX, customY, customW, customH);
+}
 
 void HalDisplay::writeGrayscalePlaneStrip(bool lsbPlane, const uint8_t* rows, uint16_t yStart, uint16_t numRows) {
   einkDisplay.writeGrayscalePlaneStrip(lsbPlane ? EInkDisplay::GRAY_PLANE_LSB : EInkDisplay::GRAY_PLANE_MSB, rows,

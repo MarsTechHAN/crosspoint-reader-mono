@@ -52,6 +52,10 @@ void ActivityManager::renderTaskLoop() {
       HalPowerManager::Lock powerLock;  // Ensure we don't go into low-power mode while rendering
       currentActivity->render(std::move(lock));
     }
+    // The visible frame is complete. Release activity ownership before panel
+    // maintenance so navigation can proceed while an optional cleanup pass is
+    // waiting/running.
+    lock.unlock();
     // Notify any task blocked in requestUpdateAndWait() that the render is done.
     TaskHandle_t waiter = nullptr;
     taskENTER_CRITICAL(&activityManagerSpinlock);
@@ -60,6 +64,10 @@ void ActivityManager::renderTaskLoop() {
     taskEXIT_CRITICAL(&activityManagerSpinlock);
     if (waiter) {
       xTaskNotify(waiter, 1, eIncrement);
+    }
+    {
+      HalPowerManager::Lock powerLock;
+      renderer.runDisplayMaintenance();
     }
   }
 }
@@ -281,6 +289,7 @@ ScreenshotInfo ActivityManager::getScreenshotInfo() const {
 }
 
 void ActivityManager::requestUpdate(bool immediate) {
+  renderer.abortDisplayWork();
   if (immediate) {
     if (renderTaskHandle) {
       xTaskNotify(renderTaskHandle, 1, eIncrement);
@@ -295,6 +304,7 @@ void ActivityManager::requestUpdateAndWait() {
   if (!renderTaskHandle) {
     return;
   }
+  renderer.abortDisplayWork();
 
   // Atomic section to perform checks
   taskENTER_CRITICAL(&activityManagerSpinlock);

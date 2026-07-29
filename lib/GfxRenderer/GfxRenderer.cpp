@@ -334,21 +334,38 @@ static void renderCharScaled(const GfxRenderer& renderer, GfxRenderer::RenderMod
     for (int dstY = 0; dstY < dstH; dstY++) {
       const int srcY = dstY * 2;
       for (int dstX = 0; dstX < dstW; dstX++) {
-        const int srcX = dstX * 2;
-        uint8_t coverage = 0;
-        uint8_t maxRaw = 0;
-        for (int sampleY = 0; sampleY < 2 && srcY + sampleY < srcH; sampleY++) {
-          for (int sampleX = 0; sampleX < 2 && srcX + sampleX < srcW; sampleX++) {
-            const int pos = (srcY + sampleY) * srcW + srcX + sampleX;
-            const uint8_t byte = bitmap[pos >> 2];
-            const uint8_t raw = (byte >> ((3 - (pos & 3)) * 2)) & 0x3;
-            coverage += raw;
-            if (raw > maxRaw) maxRaw = raw;
-          }
+      const int srcX = dstX * 2;
+      uint8_t coverage = 0;
+      uint8_t samples = 0;
+      for (int sampleY = 0; sampleY < 2 && srcY + sampleY < srcH; sampleY++) {
+        for (int sampleX = 0; sampleX < 2 && srcX + sampleX < srcW; sampleX++) {
+          const int pos = (srcY + sampleY) * srcW + srcX + sampleX;
+          const uint8_t byte = bitmap[pos >> 2];
+          const uint8_t raw = (byte >> ((3 - (pos & 3)) * 2)) & 0x3;
+          coverage += raw;
+          ++samples;
         }
-        if (maxRaw >= 2 || coverage >= 2) {
-          renderer.drawPixel(baseX + dstX, baseY + dstY, pixelState);
-        }
+      }
+
+      // Preserve coverage while shrinking 2x2 source pixels into one output
+      // pixel. The old scaled path ignored renderMode and reduced every
+      // non-trivial block to binary ink, so superscript/subscript edges never
+      // reached the four-gray AA planes. A modest contrast boost keeps a
+      // one-source-pixel stem visible at half size while retaining two edge
+      // grades: 0=transparent, 1=light, 2=dark, 3=solid.
+      uint8_t raw = 0;
+      if (coverage > 0) {
+        const uint8_t average = static_cast<uint8_t>((coverage + samples / 2) / samples);
+        raw = static_cast<uint8_t>(std::min<int>(3, average + (coverage >= 3 ? 1 : 0)));
+      }
+      if ((renderMode == GfxRenderer::BW && raw > 0) ||
+          (renderMode == GfxRenderer::BW_GRAY_BASE && raw >= 2)) {
+        renderer.drawPixel(baseX + dstX, baseY + dstY, pixelState);
+      } else if (renderMode == GfxRenderer::GRAYSCALE_MSB && (raw == 1 || raw == 2)) {
+        renderer.drawPixel(baseX + dstX, baseY + dstY, false);
+      } else if (renderMode == GfxRenderer::GRAYSCALE_LSB && raw == 2) {
+        renderer.drawPixel(baseX + dstX, baseY + dstY, false);
+      }
       }
     }
   } else {
@@ -445,7 +462,8 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
           // 0 -> black, 1 -> dark grey, 2 -> light grey, 3 -> white
           const uint8_t bmpVal = 3 - ((byte >> bit_index) & 0x3);
 
-          if (renderMode == GfxRenderer::BW && bmpVal < 3) {
+          if ((renderMode == GfxRenderer::BW && bmpVal < 3) ||
+              (renderMode == GfxRenderer::BW_GRAY_BASE && bmpVal < 2)) {
             // Black (also paints over the grays in BW mode)
             renderer.drawPixel(screenX, screenY, pixelState);
           } else if (renderMode == GfxRenderer::GRAYSCALE_MSB && (bmpVal == 1 || bmpVal == 2)) {
@@ -1342,7 +1360,7 @@ void GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
 
       const uint8_t val = outputRow[bmpX / 4] >> (6 - ((bmpX * 2) % 8)) & 0x3;
 
-      if (renderMode == BW && val < 3) {
+      if ((renderMode == BW && val < 3) || (renderMode == BW_GRAY_BASE && val < 2)) {
         drawPixel(screenX, screenY);
       } else if (renderMode == GRAYSCALE_MSB && (val == 1 || val == 2)) {
         drawPixel(screenX, screenY, false);
@@ -1556,6 +1574,12 @@ void GfxRenderer::displayBufferAsync(const HalDisplay::RefreshMode refreshMode) 
 void GfxRenderer::waitRefreshComplete() const { display.waitRefreshComplete(); }
 
 bool GfxRenderer::supportsAsyncRefresh() const { return !fadingFix && display.supportsAsyncRefresh(); }
+
+void GfxRenderer::abortDisplayWork() const { display.abortPostRefresh(); }
+
+bool GfxRenderer::displayWorkAborted() const { return display.postRefreshAborted(); }
+
+void GfxRenderer::runDisplayMaintenance() const { display.runMaintenance(); }
 
 size_t GfxRenderer::readFramebufferRegion(int x, int y, int w, int h, uint8_t* dst, size_t dstCapacity) const {
   if (dst == nullptr || w <= 0 || h <= 0) return 0;
@@ -2080,6 +2104,14 @@ void GfxRenderer::copyGrayscaleLsbBuffers() const { display.copyGrayscaleLsbBuff
 void GfxRenderer::copyGrayscaleMsbBuffers() const { display.copyGrayscaleMsbBuffers(frameBuffer); }
 
 void GfxRenderer::displayGrayBuffer() const { display.displayGrayBuffer(fadingFix); }
+
+void GfxRenderer::displayGrayCalibration(const int customX, const int customY, const int customW,
+                                         const int customH) const {
+  const AlignedMemRect rect =
+      screenRectToAlignedMemRect(orientation, customX, customY, customW, customH, panelWidth, panelHeight);
+  if (!rect.valid) return;
+  display.displayGrayCalibration(rect.x, rect.y, rect.w, rect.h);
+}
 
 void GfxRenderer::writeGrayscalePlaneStrip(bool lsbPlane, const uint8_t* scratch, int yStart, int numRows) const {
   // Guard the uint16_t casts below: a negative would wrap to a huge length.

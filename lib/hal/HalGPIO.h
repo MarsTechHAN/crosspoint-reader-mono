@@ -58,6 +58,13 @@ class HalGPIO {
   // Inline device type helpers for cleaner downstream checks
   inline bool deviceIsX3() const { return _deviceType == DeviceType::X3; }
   inline bool deviceIsX4() const { return _deviceType == DeviceType::X4; }
+  inline bool deviceIsPaperMono() const {
+#if defined(FREEINK_DEVICE_PAPERMONO)
+    return true;
+#else
+    return false;
+#endif
+  }
   bool isXteinkDevice() const;
 
   // Start button GPIO and setup SPI for screen and SD card

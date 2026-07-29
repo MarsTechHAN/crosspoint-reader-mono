@@ -3,6 +3,9 @@
 #include <BoardConfig.h>
 #include <GfxRenderer.h>
 #include <Logging.h>
+#if FREEINK_DEVICE_PAPERMONO
+#include <PaperMonoBoard.h>
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -12,6 +15,7 @@
 #include "ClearCacheActivity.h"
 #include "CrossPointSettings.h"
 #include "FontDownloadActivity.h"
+#include "GrayCalibrationActivity.h"
 #include "KOReaderSettingsActivity.h"
 #include "LanguageSelectActivity.h"
 #include "MappedInputManager.h"
@@ -55,6 +59,14 @@ void SettingsActivity::rebuildSettingsLists() {
       if (setting.inTextSettings) continue;
       readerSettings.push_back(setting);
     } else if (setting.category == StrId::STR_CAT_CONTROLS) {
+#if FREEINK_DEVICE_PAPERMONO
+      // M5PM1's short power click is a fixed sleep/wake contract on Paper
+      // Mono; exposing other app mappings would contradict the hardware path.
+      if (setting.valuePtr == &CrossPointSettings::shortPwrBtn ||
+          setting.valuePtr == &CrossPointSettings::pwrBtnFootnoteBack) {
+        continue;
+      }
+#endif
       if (setting.valuePtr == &CrossPointSettings::pwrBtnFootnoteBack &&
           SETTINGS.shortPwrBtn != CrossPointSettings::SHORT_PWRBTN::FOOTNOTES) {
         continue;
@@ -66,6 +78,9 @@ void SettingsActivity::rebuildSettingsLists() {
   }
 
   // Append device-only ACTION items
+#if FREEINK_DEVICE_PAPERMONO
+  displaySettings.push_back(SettingInfo::Action(StrId::STR_GRAY_CALIBRATION, SettingAction::GrayCalibration));
+#endif
   if (!BoardConfig::hasTouch()) {
     controlsSettings.insert(controlsSettings.begin(),
                             SettingInfo::Action(StrId::STR_REMAP_FRONT_BUTTONS, SettingAction::RemapFrontButtons));
@@ -74,11 +89,16 @@ void SettingsActivity::rebuildSettingsLists() {
   systemSettings.push_back(SettingInfo::Action(StrId::STR_KOREADER_SYNC, SettingAction::KOReaderSync));
   systemSettings.push_back(SettingInfo::Action(StrId::STR_OPDS_SERVERS, SettingAction::OPDSBrowser));
   systemSettings.push_back(SettingInfo::Action(StrId::STR_CLEAR_READING_CACHE, SettingAction::ClearCache));
+  // Paper Mono uses a single factory app partition so a stale OTA selector can
+  // never boot an old image. Its firmware is updated over USB; hide update
+  // actions that require an inactive OTA partition.
+#if !FREEINK_DEVICE_PAPERMONO
   // TODO: Touch devices need their own firmware update path/artifacts before OTA is exposed.
   if (!BoardConfig::hasTouch()) {
     systemSettings.push_back(SettingInfo::Action(StrId::STR_CHECK_UPDATES, SettingAction::CheckForUpdates));
   }
   systemSettings.push_back(SettingInfo::Action(StrId::STR_SD_FIRMWARE_UPDATE, SettingAction::SdFirmwareUpdate));
+#endif
   systemSettings.push_back(SettingInfo::Action(StrId::STR_LANGUAGE, SettingAction::Language));
   readerSettings.insert(readerSettings.begin(),
                         SettingInfo::Action(StrId::STR_TEXT_SETTINGS, SettingAction::TextSettings));
@@ -313,6 +333,12 @@ void SettingsActivity::toggleCurrentSetting() {
     openSleepTimeoutPicker();
     return;
   }
+#if FREEINK_DEVICE_PAPERMONO
+  if (setting.nameId == StrId::STR_FRONTLIGHT_BRIGHTNESS) {
+    openFrontlightBrightnessPicker();
+    return;
+  }
+#endif
 
   if (setting.type == SettingType::TOGGLE && setting.valuePtr != nullptr) {
     // Toggle the boolean value using the member pointer
@@ -406,6 +432,9 @@ void SettingsActivity::toggleCurrentSetting() {
                                  rebuildSettingsLists();
                                });
         break;
+      case SettingAction::GrayCalibration:
+        startActivityForResult(std::make_unique<GrayCalibrationActivity>(renderer, mappedInput), resultHandler);
+        break;
       case SettingAction::Language:
         startActivityForResult(std::make_unique<LanguageSelectActivity>(renderer, mappedInput), resultHandler);
         break;
@@ -460,6 +489,34 @@ void SettingsActivity::openSleepTimeoutPicker() {
         }
         requestUpdate();
       });
+}
+
+void SettingsActivity::openFrontlightBrightnessPicker() {
+#if FREEINK_DEVICE_PAPERMONO
+  startActivityForResult(
+      std::make_unique<IntervalSelectionActivity>(
+          renderer, mappedInput, "FrontlightBrightness", StrId::STR_FRONTLIGHT_BRIGHTNESS,
+          SETTINGS.frontlightBrightness, 0, 100, 5, 20, StrId::STR_PERCENT_VALUE_FORMAT, false, true,
+          StrId::STR_NONE_OPT,
+          [](const int value) {
+            if (!PaperMonoBoard::fadeFrontlightTo(static_cast<uint8_t>(value), 80)) {
+              LOG_ERR("SET", "Frontlight live update failed at %d%%", value);
+            }
+          },
+          true),
+      [this](const ActivityResult& result) {
+        if (!result.isCancelled) {
+          SETTINGS.frontlightBrightness = static_cast<uint8_t>(std::get<IntervalResult>(result.data).value);
+          if (!PaperMonoBoard::fadeFrontlightTo(SETTINGS.frontlightBrightness, 120)) {
+            LOG_ERR("SET", "Frontlight confirmation failed at %u%%", SETTINGS.frontlightBrightness);
+          }
+          if (!SETTINGS.saveToFile()) {
+            LOG_ERR("SET", "Failed to save frontlight brightness");
+          }
+        }
+        requestUpdate();
+      });
+#endif
 }
 
 void SettingsActivity::render(RenderLock&&) {
@@ -517,6 +574,13 @@ void SettingsActivity::render(RenderLock&&) {
                        static_cast<unsigned int>(SETTINGS.*(setting.valuePtr)));
               valueText = valueBuffer;
             }
+#if FREEINK_DEVICE_PAPERMONO
+          } else if (setting.nameId == StrId::STR_FRONTLIGHT_BRIGHTNESS) {
+            char valueBuffer[16];
+            snprintf(valueBuffer, sizeof(valueBuffer), tr(STR_PERCENT_VALUE_FORMAT),
+                     static_cast<unsigned int>(SETTINGS.*(setting.valuePtr)));
+            valueText = valueBuffer;
+#endif
           } else {
             valueText = std::to_string(SETTINGS.*(setting.valuePtr));
           }

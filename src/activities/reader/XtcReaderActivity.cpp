@@ -325,10 +325,13 @@ void XtcReaderActivity::renderPage() {
     LOG_DBG("XTR", "Pixel distribution: White=%lu, DarkGrey=%lu, LightGrey=%lu, Black=%lu", pixelCounts[0],
             pixelCounts[1], pixelCounts[2], pixelCounts[3]);
 
-    // Pass 1: BW buffer - draw all non-white pixels as black
+    // Pass 1: the exact two-level precursor used by SSD1683 scheme B. Dark
+    // gray starts black; light gray starts white, so the later gray pass does
+    // not first draw a thick edge and then erase it.
     for (uint16_t y = 0; y < pageHeight; y++) {
       for (uint16_t x = 0; x < pageWidth; x++) {
-        if (getPixelValue(x, y) >= 1) {
+        const uint8_t value = getPixelValue(x, y);
+        if (value == 1 || value == 3) {
           renderer.drawPixel(x, y, true);
         }
       }
@@ -348,10 +351,34 @@ void XtcReaderActivity::renderPage() {
       pagesUntilFullRefresh--;
     }
 
+    // The primary two-level page is now visible. Keep the framebuffer as-is
+    // and yield immediately when another page turn was queued during it.
+    if (renderer.displayWorkAborted()) {
+      free(pageBuffer);
+      return;
+    }
+
+    const auto restoreBwFrame = [&] {
+      renderer.setRenderMode(GfxRenderer::BW);
+      renderer.clearScreen();
+      for (uint16_t y = 0; y < pageHeight; y++) {
+        for (uint16_t x = 0; x < pageWidth; x++) {
+          const uint8_t value = getPixelValue(x, y);
+          if (value == 1 || value == 3) renderer.drawPixel(x, y, true);
+        }
+      }
+      renderer.cleanupGrayscaleWithFrameBuffer();
+    };
+
     // Pass 2: LSB buffer - mark DARK gray only (XTH value 1)
     // In LUT: 0 bit = apply gray effect, 1 bit = untouched
     renderer.clearScreen(0x00);
     for (uint16_t y = 0; y < pageHeight; y++) {
+      if ((y & 0x0F) == 0 && renderer.displayWorkAborted()) {
+        restoreBwFrame();
+        free(pageBuffer);
+        return;
+      }
       for (uint16_t x = 0; x < pageWidth; x++) {
         if (getPixelValue(x, y) == 1) {  // Dark grey only
           renderer.drawPixel(x, y, false);
@@ -364,6 +391,11 @@ void XtcReaderActivity::renderPage() {
     // In LUT: 0 bit = apply gray effect, 1 bit = untouched
     renderer.clearScreen(0x00);
     for (uint16_t y = 0; y < pageHeight; y++) {
+      if ((y & 0x0F) == 0 && renderer.displayWorkAborted()) {
+        restoreBwFrame();
+        free(pageBuffer);
+        return;
+      }
       for (uint16_t x = 0; x < pageWidth; x++) {
         const uint8_t pv = getPixelValue(x, y);
         if (pv == 1 || pv == 2) {  // Dark grey or Light grey
@@ -377,17 +409,7 @@ void XtcReaderActivity::renderPage() {
     renderer.displayGrayBuffer();
 
     // Pass 4: Re-render BW to framebuffer (restore for next frame, instead of restoreBwBuffer)
-    renderer.clearScreen();
-    for (uint16_t y = 0; y < pageHeight; y++) {
-      for (uint16_t x = 0; x < pageWidth; x++) {
-        if (getPixelValue(x, y) >= 1) {
-          renderer.drawPixel(x, y, true);
-        }
-      }
-    }
-
-    // Cleanup grayscale buffers with current frame buffer
-    renderer.cleanupGrayscaleWithFrameBuffer();
+    restoreBwFrame();
 
     free(pageBuffer);
 

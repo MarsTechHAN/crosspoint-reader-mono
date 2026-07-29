@@ -1504,7 +1504,9 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     renderer.clearScreen();
   }
 
+  renderer.setRenderMode(needsAnyGrayscale ? GfxRenderer::BW_GRAY_BASE : GfxRenderer::BW);
   page->render(renderer, fontId, orientedMarginLeft, orientedMarginTop);
+  renderer.setRenderMode(GfxRenderer::BW);
   renderStatusBar();
   const auto tBwRender = millis();
 
@@ -1526,7 +1528,9 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
 
       // Re-render page content to restore images into the blanked area
       // Status bar is not re-rendered here to avoid reading stale dynamic values (e.g. battery %)
+      renderer.setRenderMode(GfxRenderer::BW_GRAY_BASE);
       page->render(renderer, fontId, orientedMarginLeft, orientedMarginTop);
+      renderer.setRenderMode(GfxRenderer::BW);
       renderer.displayBuffer(HalDisplay::FAST_REFRESH);
     } else {
       renderer.displayBuffer(HalDisplay::HALF_REFRESH);
@@ -1562,15 +1566,31 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
 
     // Render one plane band-by-band into a whole-plane buffer without touching
     // the controller, so it can run while the refresh is still in flight.
+    auto finishCancelledGray = [&] {
+      renderer.endStripTarget();
+      renderer.setRenderMode(GfxRenderer::BW);
+      renderer.waitRefreshComplete();
+      // Harmless for a blocking base; required when the B/W refresh used the
+      // shadow-free async path and its controller baseline still needs seeding.
+      renderer.cleanupGrayscaleWithFrameBuffer();
+    };
+    if (renderer.displayWorkAborted()) {
+      finishCancelledGray();
+      return;
+    }
+
     auto renderPlaneToBuffer = [&](const bool lsbPlane, uint8_t* buf) {
       renderer.setRenderMode(lsbPlane ? GfxRenderer::GRAYSCALE_LSB : GfxRenderer::GRAYSCALE_MSB);
       for (int y = 0; y < gh; y += STRIP_ROWS) {
+        if (renderer.displayWorkAborted()) return false;
         const int rows = (gh - y < STRIP_ROWS) ? (gh - y) : STRIP_ROWS;
         renderer.beginStripTarget(buf + static_cast<size_t>(y) * gwBytes, y, rows);
         renderer.clearScreen(0x00);
         renderGrayscalePass();
         renderer.endStripTarget();
+        if (renderer.displayWorkAborted()) return false;
       }
+      return true;
     };
 
     // Tiered on heap pressure: two plane buffers hide both plane renders
@@ -1597,18 +1617,28 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     auto msbPlaneBuf = (lsbPlaneBuf && planeBufFits()) ? makeUniqueNoThrow<uint8_t[]>(planeBytes) : nullptr;
 
     if (lsbPlaneBuf) {
-      renderPlaneToBuffer(true, lsbPlaneBuf.get());
-      if (msbPlaneBuf) renderPlaneToBuffer(false, msbPlaneBuf.get());
+      if (!renderPlaneToBuffer(true, lsbPlaneBuf.get()) ||
+          (msbPlaneBuf && !renderPlaneToBuffer(false, msbPlaneBuf.get()))) {
+        finishCancelledGray();
+        return;
+      }
       const auto tGrayRender = millis();
 
       renderer.waitRefreshComplete();
+      if (renderer.displayWorkAborted()) {
+        finishCancelledGray();
+        return;
+      }
       const auto tWait = millis();
 
       renderer.writeGrayscalePlaneStrip(true, lsbPlaneBuf.get(), 0, gh);
       if (msbPlaneBuf) {
         renderer.writeGrayscalePlaneStrip(false, msbPlaneBuf.get(), 0, gh);
       } else {
-        renderPlaneToBuffer(false, lsbPlaneBuf.get());
+        if (!renderPlaneToBuffer(false, lsbPlaneBuf.get())) {
+          finishCancelledGray();
+          return;
+        }
         renderer.writeGrayscalePlaneStrip(false, lsbPlaneBuf.get(), 0, gh);
       }
       const auto tGrayWrite = millis();
@@ -1633,6 +1663,10 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
       // async refresh first (no-op on blocking panels).
       auto scratch = makeUniqueNoThrow<uint8_t[]>(static_cast<size_t>(gwBytes) * STRIP_ROWS);
       renderer.waitRefreshComplete();
+      if (renderer.displayWorkAborted()) {
+        finishCancelledGray();
+        return;
+      }
       if (!scratch) {
         LOG_ERR("ERS", "OOM: grayscale strip scratch (%d bytes); skipping AA this page", gwBytes * STRIP_ROWS);
         if (overlapRefresh) {
@@ -1647,11 +1681,19 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
         // X3 via PTL.
         renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
         for (int y = 0; y < gh; y += STRIP_ROWS) {
+          if (renderer.displayWorkAborted()) {
+            finishCancelledGray();
+            return;
+          }
           const int rows = (gh - y < STRIP_ROWS) ? (gh - y) : STRIP_ROWS;
           renderer.beginStripTarget(scratch.get(), y, rows);
           renderer.clearScreen(0x00);
           renderGrayscalePass();
           renderer.endStripTarget();
+          if (renderer.displayWorkAborted()) {
+            finishCancelledGray();
+            return;
+          }
           renderer.writeGrayscalePlaneStrip(true, scratch.get(), y, rows);
         }
         const auto tGrayLsb = millis();
@@ -1659,11 +1701,19 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
         // MSB plane.
         renderer.setRenderMode(GfxRenderer::GRAYSCALE_MSB);
         for (int y = 0; y < gh; y += STRIP_ROWS) {
+          if (renderer.displayWorkAborted()) {
+            finishCancelledGray();
+            return;
+          }
           const int rows = (gh - y < STRIP_ROWS) ? (gh - y) : STRIP_ROWS;
           renderer.beginStripTarget(scratch.get(), y, rows);
           renderer.clearScreen(0x00);
           renderGrayscalePass();
           renderer.endStripTarget();
+          if (renderer.displayWorkAborted()) {
+            finishCancelledGray();
+            return;
+          }
           renderer.writeGrayscalePlaneStrip(false, scratch.get(), y, rows);
         }
         const auto tGrayMsb = millis();
@@ -1689,6 +1739,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     // Fallback path for a controller without strip support. grayscale rendering
     // TODO: Only do this if font supports it
     if (needsAnyGrayscale) {
+      if (renderer.displayWorkAborted()) return;
       // Save the BW frame before the grayscale passes overwrite it, restore
       // after. Only needed when grayscale actually renders.
       if (!renderer.storeBwBuffer()) {
@@ -1703,6 +1754,11 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
       renderer.clearScreen(0x00);
       renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
       renderGrayscalePass();
+      if (renderer.displayWorkAborted()) {
+        renderer.setRenderMode(GfxRenderer::BW);
+        renderer.restoreBwBuffer();
+        return;
+      }
       renderer.copyGrayscaleLsbBuffers();
       const auto tGrayLsb = millis();
 
@@ -1710,6 +1766,11 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
       renderer.clearScreen(0x00);
       renderer.setRenderMode(GfxRenderer::GRAYSCALE_MSB);
       renderGrayscalePass();
+      if (renderer.displayWorkAborted()) {
+        renderer.setRenderMode(GfxRenderer::BW);
+        renderer.restoreBwBuffer();
+        return;
+      }
       renderer.copyGrayscaleMsbBuffers();
       const auto tGrayMsb = millis();
 

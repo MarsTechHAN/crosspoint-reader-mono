@@ -154,6 +154,10 @@ void BaseTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
   if (gpio.hasTouch()) {
     return;
   }
+  if (gpio.deviceIsPaperMono()) {
+    drawPaperMonoButtonHints(renderer, btn1, btn2, btn3, btn4);
+    return;
+  }
 
   const GfxRenderer::Orientation orig_orientation = renderer.getOrientation();
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);
@@ -182,6 +186,44 @@ void BaseTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
   }
 
   renderer.setOrientation(orig_orientation);
+}
+
+void BaseTheme::drawPaperMonoButtonHints(GfxRenderer& renderer, const char* back, const char* confirm,
+                                         const char* previous, const char* next) const {
+  const GfxRenderer::Orientation originalOrientation = renderer.getOrientation();
+  renderer.setOrientation(GfxRenderer::Orientation::Portrait);
+
+  constexpr int x = 0;
+  constexpr int firstY = 48;
+  constexpr int buttonWidth = 30;
+  constexpr int buttonHeight = 94;
+  constexpr int gap = 6;
+
+  auto combinedLabel = [](const char* primary, const char* held) {
+    std::string label = primary ? primary : "";
+    if (held && held[0] != '\0') {
+      if (!label.empty()) label += " / ";
+      label += held;
+    }
+    return label;
+  };
+
+  const std::string labels[] = {combinedLabel(previous, back), combinedLabel(next, confirm)};
+  for (int i = 0; i < 2; ++i) {
+    const int y = firstY + i * (buttonHeight + gap);
+    renderer.fillRect(x, y, buttonWidth, buttonHeight, false);
+    renderer.drawRect(x, y, buttonWidth, buttonHeight);
+    if (!labels[i].empty()) {
+      const std::string visible = renderer.truncatedText(SMALL_FONT_ID, labels[i].c_str(), buttonHeight - 8);
+      const int textWidth = renderer.getTextWidth(SMALL_FONT_ID, visible.c_str());
+      const int textHeight = renderer.getTextHeight(SMALL_FONT_ID);
+      const int textX = x + (buttonWidth - textHeight) / 2;
+      const int textY = y + (buttonHeight + textWidth) / 2;
+      renderer.drawTextRotated90CW(SMALL_FONT_ID, textX, textY, visible.c_str());
+    }
+  }
+
+  renderer.setOrientation(originalOrientation);
 }
 
 void BaseTheme::drawSideButtonHints(const GfxRenderer& renderer, const char* topBtn, const char* bottomBtn) const {

@@ -396,7 +396,9 @@ void TxtReaderActivity::renderPage() {
   scope.endScanAndPrewarm();
 
   // BW rendering
+  renderer.setRenderMode(SETTINGS.textAntiAliasing ? GfxRenderer::BW_GRAY_BASE : GfxRenderer::BW);
   renderLines();
+  renderer.setRenderMode(GfxRenderer::BW);
   renderStatusBar();
 
   ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);

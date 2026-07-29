@@ -226,6 +226,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t sleepTimeoutMinutes = 10;
   // E-ink refresh frequency (default 15 pages)
   uint8_t refreshFrequency = REFRESH_15;
+  // Paper Mono frontlight brightness, in percent.
+  uint8_t frontlightBrightness = 20;
+  // Paper Mono non-flashing four-gray micro-drive lengths. More dark frames
+  // lift dark gray toward white; more light frames push light gray darker.
+  uint8_t grayDarkFrames = 3;
+  uint8_t grayLightFrames = 11;
   uint8_t hyphenationEnabled = 0;
 
   // Reader screen margin settings

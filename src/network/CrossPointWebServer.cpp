@@ -5,6 +5,9 @@
 #include <HalGPIO.h>
 #include <HalStorage.h>
 #include <Logging.h>
+#if FREEINK_DEVICE_PAPERMONO
+#include <PaperMonoBoard.h>
+#endif
 #include <WiFi.h>
 #include <esp_efuse.h>
 #include <esp_efuse_table.h>
@@ -1327,6 +1330,9 @@ void CrossPointWebServer::handlePostSettings() {
   }
 
   SETTINGS.saveToFile();
+#if FREEINK_DEVICE_PAPERMONO
+  PaperMonoBoard::setFrontlightBrightness(SETTINGS.frontlightBrightness);
+#endif
 
   LOG_DBG("WEB", "Applied %d setting(s)", applied);
   server->send(200, "text/plain", String("Applied ") + String(applied) + " setting(s)");

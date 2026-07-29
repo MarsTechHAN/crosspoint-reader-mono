@@ -59,7 +59,7 @@ const ThemeMetrics& UITheme::getMetrics() const {
   const bool touch = gpio.hasTouch();
   if (!metricsValid || touch != metricsForTouch) {
     adjustedMetrics = *currentMetrics;
-    if (touch) {
+    if (touch || gpio.deviceIsPaperMono()) {
       adjustedMetrics.buttonHintsHeight = 0;
     }
     metricsForTouch = touch;
@@ -94,6 +94,11 @@ Rect UITheme::getScreenSafeArea(const GfxRenderer& renderer, bool hasFrontButton
   const int screenHeight = renderer.getScreenHeight();
   Rect safeArea = Rect{0, 0, screenWidth, screenHeight};
   const ThemeMetrics metrics = getMetrics();
+  if (gpio.deviceIsPaperMono() && hasFrontButtonHints && orientation == GfxRenderer::Orientation::Portrait) {
+    safeArea.x += metrics.sideButtonHintsWidth;
+    safeArea.width -= metrics.sideButtonHintsWidth;
+    return safeArea;
+  }
   switch (orientation) {
     case GfxRenderer::Orientation::Portrait:
       if (hasFrontButtonHints) {

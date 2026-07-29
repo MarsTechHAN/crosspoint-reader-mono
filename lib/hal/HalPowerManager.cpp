@@ -11,6 +11,10 @@
 
 #include "HalGPIO.h"
 
+#if FREEINK_DEVICE_PAPERMONO
+#include <PaperMonoBoard.h>
+#endif
+
 HalPowerManager powerManager;  // Singleton instance
 
 void HalPowerManager::begin() {
@@ -77,6 +81,23 @@ void HalPowerManager::startDeepSleep(HalGPIO& gpio) const {
   }
 #endif
 
+#if FREEINK_DEVICE_PAPERMONO
+  // Shut every switched peripheral down, then ask M5PM1 to remove system
+  // power. This is materially lower power than keeping the ESP32-S3 in deep
+  // sleep, and the PMIC's hardware power button brings the board back up.
+  PaperMonoBoard::powerDownForSleep();
+  if (PaperMonoBoard::requestPowerOff()) {
+    delay(1000);  // normally power disappears during this delay
+  }
+
+  // A failed PMIC transaction must still leave the device asleep. Side-button
+  // wake is only a fallback; the normal path above is power-button wake.
+  pinMode(2, INPUT_PULLUP);
+  pinMode(3, INPUT_PULLUP);
+  while (digitalRead(2) == LOW || digitalRead(3) == LOW) delay(20);
+  freeink::PowerManager::armWakeOnPins((1ULL << 2) | (1ULL << 3), true);
+  freeink::PowerManager::deepSleep();
+#else
   // Cut the gated peripheral rails (touch/SD/EPD on boards like the Sticky) and
   // hold the enables off through deep sleep — otherwise the GT911 and SD card
   // stay powered all through "off" and drain the battery. No-op on boards with
@@ -89,6 +110,7 @@ void HalPowerManager::startDeepSleep(HalGPIO& gpio) const {
   // Waits for the power button to be physically released (so holding it doesn't
   // immediately wake the device again), then arms the wake source and sleeps.
   freeink::PowerManager::deepSleepUntilPowerButton();
+#endif
 }
 
 uint16_t HalPowerManager::getBatteryPercentage() const {

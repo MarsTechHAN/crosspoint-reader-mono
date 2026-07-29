@@ -153,6 +153,10 @@ struct DirectPixelWriter {
         draw = (pixelValue < 3);
         state = true;
         break;
+      case GfxRenderer::BW_GRAY_BASE:
+        draw = (pixelValue < 2);
+        state = true;
+        break;
       case GfxRenderer::GRAYSCALE_MSB:
         draw = (pixelValue == 1 || pixelValue == 2);
         state = false;

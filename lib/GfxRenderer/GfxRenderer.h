@@ -27,7 +27,15 @@ enum Color : uint8_t { Clear = 0x00, White = 0x01, LightGray = 0x05, DarkGray = 
 
 class GfxRenderer {
  public:
-  enum RenderMode { BW, GRAYSCALE_LSB, GRAYSCALE_MSB };
+  enum RenderMode {
+    BW,
+    // Two-level precursor for four-gray: black+dark-gray start black while
+    // light-gray+white start white. This exactly matches SSD1683 scheme B's
+    // base and avoids a visibly over-bold intermediate frame.
+    BW_GRAY_BASE,
+    GRAYSCALE_LSB,
+    GRAYSCALE_MSB
+  };
 
   // Logical screen orientation from the perspective of callers
   enum Orientation {
@@ -176,6 +184,9 @@ class GfxRenderer {
   // fadingFix isn't forcing the blocking path. Callers can skip overlap
   // scaffolding (e.g. whole-plane grayscale buffers) when false.
   bool supportsAsyncRefresh() const;
+  void abortDisplayWork() const;
+  bool displayWorkAborted() const;
+  void runDisplayMaintenance() const;
   // EXPERIMENTAL: Windowed update - display only a rectangular region
   // void displayWindow(int x, int y, int width, int height) const;
   void invertScreen() const;
@@ -288,6 +299,7 @@ class GfxRenderer {
   void copyGrayscaleLsbBuffers() const;
   void copyGrayscaleMsbBuffers() const;
   void displayGrayBuffer() const;
+  void displayGrayCalibration(int customX, int customY, int customW, int customH) const;
 
   // Tiled grayscale (X4): stream one band of a plane straight to controller RAM
   // from `scratch` (panelWidthBytes * numRows, physical rows [yStart, yStart+

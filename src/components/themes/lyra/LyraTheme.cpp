@@ -351,6 +351,10 @@ void LyraTheme::drawButtonHints(GfxRenderer& renderer, const char* btn1, const c
   if (gpio.hasTouch()) {
     return;
   }
+  if (gpio.deviceIsPaperMono()) {
+    drawPaperMonoButtonHints(renderer, btn1, btn2, btn3, btn4);
+    return;
+  }
 
   const GfxRenderer::Orientation orig_orientation = renderer.getOrientation();
   renderer.setOrientation(GfxRenderer::Orientation::Portrait);

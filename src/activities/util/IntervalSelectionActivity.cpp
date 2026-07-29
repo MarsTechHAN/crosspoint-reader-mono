@@ -22,8 +22,26 @@ void IntervalSelectionActivity::onEnter() {
 }
 
 void IntervalSelectionActivity::adjustValue(const int delta) {
-  value = clampedValue(value + delta);
+  setValue(value + delta);
+}
+
+void IntervalSelectionActivity::setValue(const int candidate) {
+  const int next = clampedValue(candidate);
+  if (next == value) return;
+  value = next;
+  if (valueChangedCallback) valueChangedCallback(value);
   requestUpdate();
+}
+
+void IntervalSelectionActivity::finishFromBack() {
+  if (commitOnBack) {
+    setResult(IntervalResult{static_cast<uint32_t>(value)});
+  } else {
+    ActivityResult result;
+    result.isCancelled = true;
+    setResult(std::move(result));
+  }
+  finish();
 }
 
 void IntervalSelectionActivity::drawStepHintLine(const int y, const StrId labelId, const int step) {
@@ -67,10 +85,7 @@ void IntervalSelectionActivity::loop() {
       const int range = std::max(1, maxValue - minValue);
       const int dragged =
           clampedValue(minValue + std::clamp(tx - barX, 0, barWidth - 1) * range / std::max(1, barWidth - 1));
-      if (dragged != value) {
-        value = dragged;
-        requestUpdate();
-      }
+      setValue(dragged);
       return;
     }
   } else if (draggingBar) {
@@ -80,10 +95,7 @@ void IntervalSelectionActivity::loop() {
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-    ActivityResult result;
-    result.isCancelled = true;
-    setResult(std::move(result));
-    finish();
+    finishFromBack();
     return;
   }
 
@@ -96,16 +108,12 @@ void IntervalSelectionActivity::loop() {
   if (mappedInput.wasScreenTapped(tx, ty)) {
     if (ty >= barY - 20 && ty < barY + barHeight + 20 && tx >= barX && tx < barX + barWidth) {
       const int range = std::max(1, maxValue - minValue);
-      value = clampedValue(minValue + (tx - barX) * range / std::max(1, barWidth - 1));
-      requestUpdate();
+      setValue(minValue + (tx - barX) * range / std::max(1, barWidth - 1));
       return;
     }
     if (ty >= renderer.getScreenHeight() - 80) {
       if (tx < renderer.getScreenWidth() / 3) {
-        ActivityResult result;
-        result.isCancelled = true;
-        setResult(std::move(result));
-        finish();
+        finishFromBack();
       } else if (tx > renderer.getScreenWidth() * 2 / 3) {
         setResult(IntervalResult{static_cast<uint32_t>(value)});
         finish();

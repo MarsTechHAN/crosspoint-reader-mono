@@ -87,6 +87,11 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   doc["frontButtonConfirm"] = frontButtonConfirm;
   doc["frontButtonLeft"] = frontButtonLeft;
   doc["frontButtonRight"] = frontButtonRight;
+  // Paper Mono waveform tuning is edited by a dedicated calibration activity,
+  // so it intentionally stays out of the generic SettingsList.
+  doc["grayCalibrationVersion"] = 3;
+  doc["grayDarkFrames"] = grayDarkFrames;
+  doc["grayLightFrames"] = grayLightFrames;
   // Font family and size — both use dynamic getter/setters in SettingsList (the
   // option lists depend on the SD font registry), so the generic loop skips them.
   doc["fontFamily"] = fontFamily;
@@ -180,6 +185,17 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   frontButtonRight =
       clamp(doc["frontButtonRight"] | (uint8_t)FRONT_HW_RIGHT, FRONT_BUTTON_HARDWARE_COUNT, FRONT_HW_RIGHT);
   validateFrontButtonMapping(s);
+  // v3 corrects the SSD1683's hardware-observed 0x24/0x26 LUT-entry order.
+  // Reset once to the measured Paper Mono pair; subsequent user calibration
+  // remains authoritative and persists normally.
+  if ((doc["grayCalibrationVersion"] | (uint8_t)0) < 3) {
+    grayDarkFrames = 3;
+    grayLightFrames = 11;
+    needsResave = true;
+  } else {
+    grayDarkFrames = std::clamp<uint8_t>(doc["grayDarkFrames"] | (uint8_t)3, 1, 12);
+    grayLightFrames = std::clamp<uint8_t>(doc["grayLightFrames"] | (uint8_t)11, 1, 12);
+  }
 
   // Reader font size — an actual point size since 1.5. Files written by 1.4 and
   // earlier hold the old SMALL/MEDIUM/LARGE/EXTRA_LARGE slot in 0..3; no font is
