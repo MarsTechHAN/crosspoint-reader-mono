@@ -81,9 +81,13 @@ void HalDisplay::displayBufferAsync(HalDisplay::RefreshMode mode) {
   einkDisplay.displayBufferAsyncNoShadow(convertRefreshMode(mode));
 }
 
+bool HalDisplay::refreshBusy() { return einkDisplay.refreshBusy(); }
+
 void HalDisplay::waitRefreshComplete() { einkDisplay.waitRefreshComplete(); }
 
 bool HalDisplay::supportsAsyncRefresh() const { return einkDisplay.supportsAsyncRefresh(); }
+
+void HalDisplay::beginDisplayWork() { einkDisplay.beginDisplayWork(); }
 
 void HalDisplay::abortPostRefresh() { einkDisplay.abortPostRefresh(); }
 

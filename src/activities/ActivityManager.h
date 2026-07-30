@@ -65,6 +65,10 @@ class ActivityManager {
   // Whether to trigger a render after the current loop()
   // This variable must only be set by the main loop, to avoid race conditions
   std::atomic<bool> requestedUpdate{false};
+  std::atomic<unsigned long> lastUpdateRequestedMs{0};
+  std::atomic<uint32_t> updateSequence{0};
+  std::atomic<uint32_t> interactionSequence{0};
+  uint32_t waitingUpdateSequence = 0;
 
  public:
   explicit ActivityManager(GfxRenderer& renderer, MappedInputManager& mappedInput)
@@ -109,6 +113,10 @@ class ActivityManager {
   // If immediate is true, the update will be triggered immediately.
   // Otherwise, it will be deferred until the end of the current loop iteration.
   void requestUpdate(bool immediate = false);
+
+  // Cancel optional panel work at the raw input edge and restart the deferred
+  // maintenance quiet window without forcing an unnecessary UI render.
+  void noteUserInteraction();
 
   // Trigger a render and block until it completes.
   // Must NOT be called from the render task or while holding a RenderLock.

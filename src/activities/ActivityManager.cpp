@@ -20,6 +20,9 @@
 #include "util/FullScreenMessageActivity.h"
 
 static portMUX_TYPE activityManagerSpinlock = portMUX_INITIALIZER_UNLOCKED;
+namespace {
+constexpr uint32_t DISPLAY_MAINTENANCE_QUIET_MS = 350;
+}
 
 void ActivityManager::begin() {
 #if defined(configNUM_CORES) && configNUM_CORES > 1
@@ -43,31 +46,68 @@ void ActivityManager::renderTaskTrampoline(void* param) {
 }
 
 void ActivityManager::renderTaskLoop() {
+  uint32_t renderedSequence = 0;
   while (true) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    // Acquire the lock before reading currentActivity to avoid a TOCTOU race
-    // where the main task deletes the activity between the null-check and render().
-    RenderLock lock;
-    if (currentActivity) {
-      HalPowerManager::Lock powerLock;  // Ensure we don't go into low-power mode while rendering
-      currentActivity->render(std::move(lock));
-    }
-    // The visible frame is complete. Release activity ownership before panel
-    // maintenance so navigation can proceed while an optional cleanup pass is
-    // waiting/running.
-    lock.unlock();
-    // Notify any task blocked in requestUpdateAndWait() that the render is done.
-    TaskHandle_t waiter = nullptr;
-    taskENTER_CRITICAL(&activityManagerSpinlock);
-    waiter = waitingTaskHandle;
-    waitingTaskHandle = nullptr;
-    taskEXIT_CRITICAL(&activityManagerSpinlock);
-    if (waiter) {
-      xTaskNotify(waiter, 1, eIncrement);
-    }
-    {
-      HalPowerManager::Lock powerLock;
-      renderer.runDisplayMaintenance();
+    while (true) {
+      const uint32_t sequence = updateSequence.load();
+      unsigned long renderStarted = 0;
+      unsigned long foregroundDone = 0;
+      if (sequence != renderedSequence) {
+        renderStarted = millis();
+        const unsigned long requestedAt = lastUpdateRequestedMs.load();
+        LOG_DBG("ACT", "Render start: seq=%lu queued=%lums", static_cast<unsigned long>(sequence),
+                requestedAt == 0 ? 0 : renderStarted - requestedAt);
+        // Acquire the lock before reading currentActivity to avoid a TOCTOU race
+        // where the main task deletes the activity between the null-check and render().
+        RenderLock lock;
+        if (currentActivity) {
+          HalPowerManager::Lock powerLock;
+          // Bind cancellation before any CPU-side composition. An input edge
+          // which lands during layout then cancels this render's gray/cleanup
+          // tail instead of being erased when displayStart() is reached.
+          renderer.beginDisplayWork();
+          currentActivity->render(std::move(lock));
+        }
+        lock.unlock();
+        foregroundDone = millis();
+        renderedSequence = sequence;
+
+        // Wake a synchronous caller only after the generation it requested has
+        // actually rendered, not after an older in-flight render happens to end.
+        TaskHandle_t waiter = nullptr;
+        taskENTER_CRITICAL(&activityManagerSpinlock);
+        if (waitingTaskHandle && sequence >= waitingUpdateSequence) {
+          waiter = waitingTaskHandle;
+          waitingTaskHandle = nullptr;
+          waitingUpdateSequence = 0;
+        }
+        taskEXIT_CRITICAL(&activityManagerSpinlock);
+        if (waiter) xTaskNotify(waiter, 1, eIncrement);
+      }
+
+      const uint32_t quietInteraction = interactionSequence.load();
+      const uint32_t quietUpdate = updateSequence.load();
+      if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(DISPLAY_MAINTENANCE_QUIET_MS)) > 0) {
+        continue;
+      }
+      if (interactionSequence.load() != quietInteraction || updateSequence.load() != quietUpdate) {
+        continue;
+      }
+
+      const unsigned long maintenanceStarted = millis();
+      {
+        HalPowerManager::Lock powerLock;
+        renderer.runDisplayMaintenance();
+      }
+      const unsigned long maintenanceMs = millis() - maintenanceStarted;
+      if (renderStarted != 0) {
+        LOG_DBG("ACT", "Render complete: seq=%lu foreground=%lums maintenance=%lums",
+                static_cast<unsigned long>(sequence), foregroundDone - renderStarted, maintenanceMs);
+      } else if (maintenanceMs > 0) {
+        LOG_DBG("ACT", "Deferred display maintenance: %lums", maintenanceMs);
+      }
+      break;
     }
   }
 }
@@ -290,6 +330,8 @@ ScreenshotInfo ActivityManager::getScreenshotInfo() const {
 
 void ActivityManager::requestUpdate(bool immediate) {
   renderer.abortDisplayWork();
+  lastUpdateRequestedMs.store(millis());
+  updateSequence.fetch_add(1);
   if (immediate) {
     if (renderTaskHandle) {
       xTaskNotify(renderTaskHandle, 1, eIncrement);
@@ -300,11 +342,20 @@ void ActivityManager::requestUpdate(bool immediate) {
     requestedUpdate = true;
   }
 }
+
+void ActivityManager::noteUserInteraction() {
+  renderer.abortDisplayWork();
+  interactionSequence.fetch_add(1);
+  if (renderTaskHandle) xTaskNotify(renderTaskHandle, 1, eIncrement);
+}
+
 void ActivityManager::requestUpdateAndWait() {
   if (!renderTaskHandle) {
     return;
   }
   renderer.abortDisplayWork();
+  lastUpdateRequestedMs.store(millis());
+  const uint32_t sequence = updateSequence.fetch_add(1) + 1;
 
   // Atomic section to perform checks
   taskENTER_CRITICAL(&activityManagerSpinlock);
@@ -315,6 +366,7 @@ void ActivityManager::requestUpdateAndWait() {
   bool holdingRenderLock = (mutexHolder == currTaskHandler);
   if (!alreadyWaiting && !isRenderTask && !holdingRenderLock) {
     waitingTaskHandle = currTaskHandler;
+    waitingUpdateSequence = sequence;
   }
   taskEXIT_CRITICAL(&activityManagerSpinlock);
 

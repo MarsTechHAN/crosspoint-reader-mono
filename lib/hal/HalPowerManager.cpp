@@ -115,18 +115,39 @@ void HalPowerManager::startDeepSleep(HalGPIO& gpio) const {
 
 uint16_t HalPowerManager::getBatteryPercentage() const {
   static const BatteryMonitor battery;
-  if (BoardConfig::ACTIVE.batteryGauge.gaugeAddr != 0) {
+  const bool checkedTelemetry = BoardConfig::ACTIVE.batteryGauge.gaugeAddr != 0 ||
+                                BoardConfig::isM5StackPaperColor() || BoardConfig::isPaperMono();
+  if (checkedTelemetry) {
     const unsigned long now = millis();
     if (_batteryLastPollMs != 0 && (now - _batteryLastPollMs) < BATTERY_POLL_MS) {
       return _batteryCachedPercent;
     }
 
     _batteryLastPollMs = now;
-    uint16_t percent = 0;
-    if (!battery.readPercentageChecked(percent)) {
-      return _batteryCachedPercent;
+    if (BoardConfig::isM5StackPaperColor() || BoardConfig::isPaperMono()) {
+      const BatteryMonitor::Status status = battery.readStatus();
+      // Preserve the last valid state across a transient I2C failure. A real
+      // unplug is a successful PMIC sample with chargingKnown=true/false, while
+      // treating an unreadable sample as "not charging" makes the icon flicker.
+      if (status.chargingKnown) {
+        _batteryCachedChargingKnown = true;
+        _batteryCachedCharging = status.charging;
+      }
+      if (!status.percentageKnown) {
+        LOG_ERR("PWR", "M5PM1 battery telemetry unavailable; retaining %d%%", _batteryCachedPercent);
+        return _batteryCachedPercent;
+      }
+      _batteryCachedPercent = status.percentage;
+      LOG_DBG("PWR", "M5PM1 battery: %u%% %umV ext=%d vin=%ldmV usb=%ldmV src=%d",
+              status.percentage, status.millivolts, status.externalPowerKnown ? status.externalPower : -1,
+              static_cast<long>(status.pm1VinMv), static_cast<long>(status.pm1VinOutMv), status.pm1PowerSource);
+    } else {
+      uint16_t percent = 0;
+      if (!battery.readPercentageChecked(percent)) {
+        return _batteryCachedPercent;
+      }
+      _batteryCachedPercent = percent;
     }
-    _batteryCachedPercent = percent;
     return _batteryCachedPercent;
   }
 
@@ -137,6 +158,12 @@ uint16_t HalPowerManager::getBatteryPercentage() const {
     _batteryCachedPercent = (_batteryCachedPercent * 9 + battery.readPercentage() * 10) / 10;
   }
   return _batteryCachedPercent / 10;
+}
+
+bool HalPowerManager::isCharging() const {
+  // Refreshes percentage and charging from one cached PMIC transaction.
+  getBatteryPercentage();
+  return _batteryCachedChargingKnown && _batteryCachedCharging;
 }
 
 HalPowerManager::Lock::Lock() {

@@ -24,6 +24,9 @@ class MappedInputManager {
   bool isPressed(Button button) const;
   bool hasTouch() const;
   bool wasScreenTapped(int& x, int& y) const;
+  // Serial diagnostics can inject one logical-coordinate tap through the same
+  // activity hit-testing path as the FT6336. Consumed once by wasScreenTapped.
+  void injectDebugTap(int x, int y);
   bool wasScreenTouchDown(int& x, int& y) const;
   bool isScreenTouchHeld(int& x, int& y) const;
   bool wasTapInRect(int x, int y, int width, int height) const;
@@ -81,4 +84,7 @@ class MappedInputManager {
   mutable bool touchHeldOverrideValid = false;
   mutable unsigned long touchHeldOverrideMs = 0;
   mutable unsigned long touchHeldOverrideAt = 0;
+  mutable bool debugTapPending = false;
+  mutable int debugTapX = 0;
+  mutable int debugTapY = 0;
 };

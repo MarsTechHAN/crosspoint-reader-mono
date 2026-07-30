@@ -342,14 +342,25 @@ void EpubReaderActivity::loop() {
       idlePrewarmPage = section->currentPage;
       const int nextPage = section->currentPage + 1;
       if (nextPage < static_cast<int>(section->pageCount)) {
-        if (const auto p = section->loadPage(nextPage)) {
+        std::unique_ptr<Page> p;
+        if (prefetchedPage && prefetchedSpine == currentSpineIndex && prefetchedPageNumber == nextPage) {
+          p = std::move(prefetchedPage);
+        } else {
+          prefetchedPage.reset();
+          p = section->loadPage(nextPage);
+        }
+        if (p) {
+          const auto t0 = millis();
           if (auto* fcm = renderer.getFontCacheManager()) {
-            const auto t0 = millis();
             auto scope = fcm->createPrewarmScope();
             p->render(renderer, SETTINGS.getReaderFontId(), 0, 0);  // scan only, no pixels
             scope.endScanAndPrewarm();
-            LOG_DBG("ERS", "Idle prewarm: page %d in %lums", nextPage, millis() - t0);
           }
+          prefetchedPage = std::move(p);
+          prefetchedSpine = currentSpineIndex;
+          prefetchedPageNumber = nextPage;
+          LOG_DBG("ERS", "Idle prefetch retained: spine=%d page=%d in %lums", prefetchedSpine,
+                  prefetchedPageNumber, millis() - t0);
         }
       }
     }
@@ -990,6 +1001,32 @@ void EpubReaderActivity::toggleAutoPageTurn(const uint8_t selectedPageTurnOption
 }
 
 void EpubReaderActivity::pageTurn(bool isForwardTurn) {
+  const int8_t direction = isForwardTurn ? 1 : -1;
+  if (xQueueSend(pageTurnQueue, &direction, 0) != pdTRUE) {
+    // Keep the newest gesture if an extreme burst fills the queue. FreeRTOS
+    // serializes this producer-side drop with the render-task consumer.
+    int8_t dropped = 0;
+    xQueueReceive(pageTurnQueue, &dropped, 0);
+    xQueueSend(pageTurnQueue, &direction, 0);
+    LOG_DBG("ERS", "Page-turn FIFO full; dropped oldest dir=%d", dropped);
+  }
+  LOG_DBG("ERS", "Page turn enqueued: dir=%s depth=%u", isForwardTurn ? "next" : "prev",
+          static_cast<unsigned>(uxQueueMessagesWaiting(pageTurnQueue)));
+  requestUpdate();
+}
+
+void EpubReaderActivity::drainQueuedPageTurns() {
+  if (!pageTurnQueue) return;
+  int8_t direction = 0;
+  while (section && xQueueReceive(pageTurnQueue, &direction, 0) == pdTRUE) {
+    applyQueuedPageTurn(direction > 0);
+  }
+}
+
+void EpubReaderActivity::applyQueuedPageTurn(bool isForwardTurn) {
+  const unsigned long inputAt = millis();
+  const int oldSpine = currentSpineIndex;
+  const int oldPage = section ? section->currentPage : -1;
   if (isForwardTurn) {
     // Advance within the section while there are (or may still be) more pages: either a built
     // page ahead, or the section is still building (windowed), in which case more pages exist
@@ -999,30 +1036,24 @@ void EpubReaderActivity::pageTurn(bool isForwardTurn) {
     if (section->currentPage < section->pageCount - 1 || section->isBuilding()) {
       section->currentPage++;
     } else {
-      // We don't want to delete the section mid-render, so grab the semaphore
-      {
-        RenderLock lock(*this);
-        nextPageNumber = 0;
-        currentSpineIndex++;
-        section.reset();
-      }
+      nextPageNumber = 0;
+      currentSpineIndex++;
+      section.reset();
     }
   } else {
     if (section->currentPage > 0) {
       section->currentPage--;
     } else if (currentSpineIndex > 0) {
-      // We don't want to delete the section mid-render, so grab the semaphore
-      {
-        RenderLock lock(*this);
-        nextPageNumber = 0;
-        pendingPageJump = std::numeric_limits<uint16_t>::max();
-        currentSpineIndex--;
-        section.reset();
-      }
+      nextPageNumber = 0;
+      pendingPageJump = std::numeric_limits<uint16_t>::max();
+      currentSpineIndex--;
+      section.reset();
     }
   }
   lastPageTurnTime = millis();
-  requestUpdate();
+  LOG_DBG("ERS", "Page turn applied: dir=%s from=%d:%d to=%d:%d decision=%lums", isForwardTurn ? "next" : "prev",
+          oldSpine, oldPage, currentSpineIndex, section ? section->currentPage : nextPageNumber,
+          millis() - inputAt);
 }
 
 // TODO: Failure handling
@@ -1054,6 +1085,10 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   if (currentSpineIndex > epub->getSpineItemsCount()) {
     currentSpineIndex = epub->getSpineItemsCount();
   }
+
+  // The render task is the only owner which mutates page/spine state for
+  // ordinary turns. Input remains responsive by only enqueueing intents.
+  drainQueuedPageTurns();
 
   // Show end of book screen
   if (currentSpineIndex == epub->getSpineItemsCount()) {
@@ -1282,6 +1317,15 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     }
   }
 
+  // A burst can cross a chapter boundary. Consume the rest only after the new
+  // section exists. If it crosses again, schedule another serialized render
+  // and avoid presenting this now-obsolete intermediate chapter.
+  drainQueuedPageTurns();
+  if (!section) {
+    requestUpdate();
+    return;
+  }
+
   // Extend the build to the requested page if needed (for partials and in-progress builds).
   // This runs every render, so it covers both the first page and any forward turn that gets
   // ahead of the background builder; pages already built do no work here.
@@ -1366,7 +1410,22 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   {
     // Unified page read: the in-progress build's in-RAM table if it has reached the page,
     // otherwise the on-disk file (finalized section, or a partial from a previous session).
-    auto p = section->loadPage(section->currentPage);
+    const auto loadStarted = millis();
+    std::unique_ptr<Page> p;
+    if (prefetchedPage && prefetchedSpine == currentSpineIndex && prefetchedPageNumber == section->currentPage) {
+      p = std::move(prefetchedPage);
+      LOG_DBG("ERS", "Page cache hit: spine=%d page=%d age=%lums", currentSpineIndex, section->currentPage,
+              millis() - lastRenderCompleteMs);
+    } else {
+      // A direction change makes the one-page prediction stale. Release it
+      // before loading so deserialization gets the maximum contiguous heap.
+      prefetchedPage.reset();
+      prefetchedSpine = -1;
+      prefetchedPageNumber = -1;
+      p = section->loadPage(section->currentPage);
+      LOG_DBG("ERS", "Page load: spine=%d page=%d took=%lums", currentSpineIndex, section->currentPage,
+              millis() - loadStarted);
+    }
     if (!p) {
       LOG_ERR("ERS", "Failed to load page from SD - clearing section cache");
       automaticPageTurnActive = false;
@@ -1404,8 +1463,9 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   // Only persist when the position actually changed. render() also runs on menu,
   // bookmark and screenshot re-renders, and writeAtomic is several FAT ops for 6 bytes.
   // Every real page turn changes currentPage, so progress durability is unaffected.
-  if (currentSpineIndex != lastSavedSpineIndex || section->currentPage != lastSavedPage ||
-      section->pageCount != lastSavedPageCount) {
+  if (lastPageDisplayCommitted &&
+      (currentSpineIndex != lastSavedSpineIndex || section->currentPage != lastSavedPage ||
+       section->pageCount != lastSavedPageCount)) {
     if (saveProgress(currentSpineIndex, section->currentPage, section->estimatedTotalPages())) {
       lastSavedSpineIndex = currentSpineIndex;
       lastSavedPage = section->currentPage;
@@ -1459,6 +1519,7 @@ bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageC
 void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int orientedMarginTop,
                                         const int orientedMarginRight, const int orientedMarginBottom,
                                         const int orientedMarginLeft) {
+  lastPageDisplayCommitted = false;
   const auto t0 = millis();
   const int fontId = SETTINGS.getReaderFontId();
 
@@ -1475,6 +1536,10 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   page->render(renderer, fontId, orientedMarginLeft, orientedMarginTop);  // scan pass
   scope.endScanAndPrewarm();
   const auto tPrewarm = millis();
+  if (renderer.displayWorkAborted()) {
+    LOG_DBG("ERS", "Dropped obsolete page before framebuffer composition");
+    return;
+  }
 
   const bool pageHasImages = page->hasImages();
   const bool pageHasImagesNeedingDecode = pageHasImages && page->hasImagesNeedingDecode();
@@ -1500,6 +1565,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   if (pageHasImagesNeedingDecode) {
     page->renderWithImagePlaceholders(renderer, fontId, orientedMarginLeft, orientedMarginTop);
     renderStatusBar();
+    if (renderer.displayWorkAborted()) return;
     renderer.displayBuffer(HalDisplay::FAST_REFRESH);
     renderer.clearScreen();
   }
@@ -1509,6 +1575,10 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   renderer.setRenderMode(GfxRenderer::BW);
   renderStatusBar();
   const auto tBwRender = millis();
+  if (renderer.displayWorkAborted()) {
+    LOG_DBG("ERS", "Dropped obsolete page before B/W waveform");
+    return;
+  }
 
   if (pageHasImages) {
     // Double FAST_REFRESH with selective image blanking (pablohc's technique):
@@ -1547,13 +1617,13 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     // below overlaps the panel's refresh time instead of following it.
     ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh, overlapRefresh);
   }
+  lastPageDisplayCommitted = true;
   const auto tDisplay = millis();
 
-  // Tiled grayscale: render each plane band-by-band, leaving the BW
-  // framebuffer intact so no full-frame storeBwBuffer is needed; controller
-  // RAM is re-synced from the live framebuffer afterward. The page is
-  // re-rendered ceil(H/STRIP_ROWS) times per plane, but renderCharImpl culls
-  // out-of-band glyphs before decode so the cost stays close to one render.
+  // Tiled grayscale leaves the BW framebuffer intact so no full-frame
+  // storeBwBuffer is needed; controller RAM is re-synced from the live
+  // framebuffer afterward. When a whole-plane buffer is available, render the
+  // page once directly into it. The strip fallback still renders band-by-band.
   // Both text (drawPixel) and images (DirectPixelWriter) honor the active
   // strip target. When the BW refresh above went out async, the plane
   // rendering below overlaps the panel's refresh time; only the controller
@@ -1564,8 +1634,9 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     const int gwBytes = renderer.getDisplayWidthBytes();
     const size_t planeBytes = static_cast<size_t>(gwBytes) * gh;
 
-    // Render one plane band-by-band into a whole-plane buffer without touching
-    // the controller, so it can run while the refresh is still in flight.
+    // Render one complete plane without touching the controller, so it can run
+    // while the refresh is still in flight. beginStripTarget() also supports a
+    // full-height target and keeps raw image writers off the live BW buffer.
     auto finishCancelledGray = [&] {
       renderer.endStripTarget();
       renderer.setRenderMode(GfxRenderer::BW);
@@ -1580,17 +1651,13 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     }
 
     auto renderPlaneToBuffer = [&](const bool lsbPlane, uint8_t* buf) {
+      if (renderer.displayWorkAborted()) return false;
       renderer.setRenderMode(lsbPlane ? GfxRenderer::GRAYSCALE_LSB : GfxRenderer::GRAYSCALE_MSB);
-      for (int y = 0; y < gh; y += STRIP_ROWS) {
-        if (renderer.displayWorkAborted()) return false;
-        const int rows = (gh - y < STRIP_ROWS) ? (gh - y) : STRIP_ROWS;
-        renderer.beginStripTarget(buf + static_cast<size_t>(y) * gwBytes, y, rows);
-        renderer.clearScreen(0x00);
-        renderGrayscalePass();
-        renderer.endStripTarget();
-        if (renderer.displayWorkAborted()) return false;
-      }
-      return true;
+      renderer.beginStripTarget(buf, 0, gh);
+      renderer.clearScreen(0x00);
+      renderGrayscalePass();
+      renderer.endStripTarget();
+      return !renderer.displayWorkAborted();
     };
 
     // Tiered on heap pressure: two plane buffers hide both plane renders
@@ -1613,16 +1680,53 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
       return ESP.getFreeHeap() >= planeBytes + PLANE_BUF_HEADROOM &&
              ESP.getMaxAllocHeap() >= planeBytes + PLANE_BUF_MAX_ALLOC_RESERVE;
     };
-    auto lsbPlaneBuf = (overlapRefresh && planeBufFits()) ? makeUniqueNoThrow<uint8_t[]>(planeBytes) : nullptr;
-    auto msbPlaneBuf = (lsbPlaneBuf && planeBufFits()) ? makeUniqueNoThrow<uint8_t[]>(planeBytes) : nullptr;
+    if (grayPlaneBufferBytes != 0 && grayPlaneBufferBytes != planeBytes) {
+      grayLsbPlaneBuffer.reset();
+      grayMsbPlaneBuffer.reset();
+      grayPlaneBufferBytes = 0;
+    }
+    if (!grayLsbPlaneBuffer && overlapRefresh && planeBufFits()) {
+      grayLsbPlaneBuffer = makeUniqueNoThrow<uint8_t[]>(planeBytes);
+      if (grayLsbPlaneBuffer) grayPlaneBufferBytes = planeBytes;
+    }
+    if (!grayMsbPlaneBuffer && grayLsbPlaneBuffer && planeBufFits()) {
+      grayMsbPlaneBuffer = makeUniqueNoThrow<uint8_t[]>(planeBytes);
+    }
+    uint8_t* const lsbPlaneBuf = grayLsbPlaneBuffer.get();
+    uint8_t* const msbPlaneBuf = grayMsbPlaneBuffer.get();
 
     if (lsbPlaneBuf) {
-      if (!renderPlaneToBuffer(true, lsbPlaneBuf.get()) ||
-          (msbPlaneBuf && !renderPlaneToBuffer(false, msbPlaneBuf.get()))) {
+      if (!renderPlaneToBuffer(true, lsbPlaneBuf) || (msbPlaneBuf && !renderPlaneToBuffer(false, msbPlaneBuf))) {
         finishCancelledGray();
         return;
       }
       const auto tGrayRender = millis();
+
+      // EDCBook starts preparing its adjacent page while the panel is BUSY.
+      // Do the same here, but retain only the deserialized Page and leave glyph
+      // I/O to the normal idle prewarm. The BUSY check ensures this work only
+      // consumes otherwise-dead waveform time; generous heap gates avoid
+      // competing with the two retained gray planes.
+      constexpr size_t OVERLAP_PREFETCH_MIN_FREE_HEAP = 96 * 1024;
+      constexpr size_t OVERLAP_PREFETCH_MIN_MAX_ALLOC = 32 * 1024;
+      if (renderer.refreshBusy() && !renderer.displayWorkAborted() && section && !section->isBuilding() &&
+          ESP.getFreeHeap() > OVERLAP_PREFETCH_MIN_FREE_HEAP &&
+          ESP.getMaxAllocHeap() > OVERLAP_PREFETCH_MIN_MAX_ALLOC) {
+        const int adjacentPage = section->currentPage + 1;
+        if (adjacentPage < static_cast<int>(section->pageCount) &&
+            (!prefetchedPage || prefetchedSpine != currentSpineIndex || prefetchedPageNumber != adjacentPage)) {
+          const auto prefetchStarted = millis();
+          auto candidate = section->loadPage(adjacentPage);
+          if (candidate && !renderer.displayWorkAborted()) {
+            prefetchedPage = std::move(candidate);
+            prefetchedSpine = currentSpineIndex;
+            prefetchedPageNumber = adjacentPage;
+            LOG_DBG("ERS", "Waveform-overlap prefetch: spine=%d page=%d took=%lums busy=%d", prefetchedSpine,
+                    prefetchedPageNumber, millis() - prefetchStarted, renderer.refreshBusy());
+          }
+        }
+      }
+      const auto tOverlapPrefetch = millis();
 
       renderer.waitRefreshComplete();
       if (renderer.displayWorkAborted()) {
@@ -1631,15 +1735,15 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
       }
       const auto tWait = millis();
 
-      renderer.writeGrayscalePlaneStrip(true, lsbPlaneBuf.get(), 0, gh);
+      renderer.writeGrayscalePlaneStrip(true, lsbPlaneBuf, 0, gh);
       if (msbPlaneBuf) {
-        renderer.writeGrayscalePlaneStrip(false, msbPlaneBuf.get(), 0, gh);
+        renderer.writeGrayscalePlaneStrip(false, msbPlaneBuf, 0, gh);
       } else {
-        if (!renderPlaneToBuffer(false, lsbPlaneBuf.get())) {
+        if (!renderPlaneToBuffer(false, lsbPlaneBuf)) {
           finishCancelledGray();
           return;
         }
-        renderer.writeGrayscalePlaneStrip(false, lsbPlaneBuf.get(), 0, gh);
+        renderer.writeGrayscalePlaneStrip(false, lsbPlaneBuf, 0, gh);
       }
       const auto tGrayWrite = millis();
 
@@ -1654,9 +1758,11 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
 
       LOG_DBG("ERS",
               "Page render (tiled async): prewarm=%lums bw_render=%lums display=%lums gray_render=%lums "
-              "wait=%lums gray_write=%lums gray_display=%lums cleanup=%lums total=%lums (planes buffered: %d)",
-              tPrewarm - t0, tBwRender - tPrewarm, tDisplay - tBwRender, tGrayRender - tDisplay, tWait - tGrayRender,
-              tGrayWrite - tWait, tGrayDisplay - tGrayWrite, tEnd - tGrayDisplay, tEnd - t0, msbPlaneBuf ? 2 : 1);
+              "prefetch=%lums wait=%lums gray_write=%lums gray_display=%lums cleanup=%lums total=%lums "
+              "(planes buffered: %d)",
+              tPrewarm - t0, tBwRender - tPrewarm, tDisplay - tBwRender, tGrayRender - tDisplay,
+              tOverlapPrefetch - tGrayRender, tWait - tOverlapPrefetch, tGrayWrite - tWait,
+              tGrayDisplay - tGrayWrite, tEnd - tGrayDisplay, tEnd - t0, msbPlaneBuf ? 2 : 1);
     } else {
       // Per-strip scratch tier: blocking panels (X3) and the OOM fallback.
       // The strip writes below need the panel idle, so wait out any pending

@@ -134,9 +134,12 @@ void TextBlock::render(const GfxRenderer& renderer, const int fontId, const int 
     std::string text;
     BidiUtils::BidiBaseDir baseDir;
   };
-  std::vector<int> wordShiftArr(numWords, 0);
-  std::vector<RubyDrawInfo> rubies(numWords);
-  if (hasRuby()) {
+  const bool rubyPresent = hasRuby();
+  std::vector<int> wordShiftArr;
+  std::vector<RubyDrawInfo> rubies;
+  if (rubyPresent) {
+    wordShiftArr.resize(numWords, 0);
+    rubies.resize(numWords);
     int accumulatedShift = 0;
     int lastEnd = -9999;
     for (uint16_t i = 0; i < numWords; i++) {
@@ -257,7 +260,7 @@ void TextBlock::render(const GfxRenderer& renderer, const int fontId, const int 
       wordY += ascender / 4;
     }
 
-    const int drawX = wordX + wordShiftArr[i];
+    const int drawX = wordX + (rubyPresent ? wordShiftArr[i] : 0);
 
     if (boundary > 0) {
       // Focus split: draw bold prefix, then the regular suffix at a pre-computed x offset.

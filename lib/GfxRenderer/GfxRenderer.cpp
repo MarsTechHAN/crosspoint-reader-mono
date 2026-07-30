@@ -1571,9 +1571,13 @@ void GfxRenderer::displayBufferAsync(const HalDisplay::RefreshMode refreshMode) 
   display.displayBufferAsync(refreshMode);
 }
 
+bool GfxRenderer::refreshBusy() const { return display.refreshBusy(); }
+
 void GfxRenderer::waitRefreshComplete() const { display.waitRefreshComplete(); }
 
 bool GfxRenderer::supportsAsyncRefresh() const { return !fadingFix && display.supportsAsyncRefresh(); }
+
+void GfxRenderer::beginDisplayWork() const { display.beginDisplayWork(); }
 
 void GfxRenderer::abortDisplayWork() const { display.abortPostRefresh(); }
 

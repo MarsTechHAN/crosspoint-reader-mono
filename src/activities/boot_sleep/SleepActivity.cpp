@@ -19,6 +19,12 @@
 
 void SleepActivity::onEnter() {
   Activity::onEnter();
+#if FREEINK_DEVICE_PAPERMONO
+  // Sleep screens are drawn synchronously rather than by ActivityManager's
+  // render task. Open an explicit display generation so a staged grayscale
+  // cover can be committed before the EPD rail is cut.
+  renderer.beginDisplayWork();
+#endif
 
   const bool renderQuickResume =
       SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
@@ -150,13 +156,22 @@ void SleepActivity::renderCustomSleepScreen() const {
   renderDefaultSleepScreen();
 }
 
-// Sleep screens paint with a single HALF refresh (stock parity): the OEM X4
-// firmware's only clean refresh in normal operation is the single-pass 0xD7
-// sequence, used once for the sleep image. It never runs the multi-flash GC
-// waveform (0xF7) that FULL_REFRESH selects (#2471's blinking complaint).
+// Non-Mono sleep screens retain the stock single-HALF behavior. Paper Mono's
+// default lock screen explicitly uses its endpoint-sweep FULL mode below.
 void SleepActivity::renderDefaultSleepScreen() const {
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
+
+#if FREEINK_DEVICE_PAPERMONO
+  // Sleep is the one place where latency is secondary to a stable retained
+  // image. Finish a white -> black endpoint cleaning run first. The final logo
+  // is then presented from a known black state, so its central white area gets
+  // a definite black-to-white transition instead of retaining reader gray.
+  renderer.clearScreen(0xFF);
+  renderer.displayBuffer(HalDisplay::FULL_REFRESH);
+  renderer.clearScreen(0x00);
+  renderer.displayBuffer(HalDisplay::FULL_REFRESH);
+#endif
 
   renderer.clearScreen();
   renderer.drawImage(Logo120, (pageWidth - 120) / 2, (pageHeight - 120) / 2, 120, 120);
@@ -168,7 +183,12 @@ void SleepActivity::renderDefaultSleepScreen() const {
     renderer.invertScreen();
   }
 
+#if FREEINK_DEVICE_PAPERMONO
+  // Final, non-cancellable logo commit after the endpoint cleaning run.
+  renderer.displayBuffer(HalDisplay::FULL_REFRESH);
+#else
   renderer.displayBuffer(HalDisplay::HALF_REFRESH);
+#endif
 }
 
 void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap) const {

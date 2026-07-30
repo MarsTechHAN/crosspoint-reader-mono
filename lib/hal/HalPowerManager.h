@@ -18,6 +18,8 @@ class HalPowerManager {
   bool isLowPower = false;
 
   mutable int _batteryCachedPercent = 0;         // Last read battery percentage (0-100)
+  mutable bool _batteryCachedCharging = false;
+  mutable bool _batteryCachedChargingKnown = false;
   mutable unsigned long _batteryLastPollMs = 0;  // Timestamp of last battery read in milliseconds
 
   enum LockMode { None, NormalSpeed };
@@ -44,6 +46,7 @@ class HalPowerManager {
 
   // Get battery percentage (range 0-100)
   uint16_t getBatteryPercentage() const;
+  bool isCharging() const;
 
   // RAII helper class to manage power saving locks
   // Usage: create an instance of Lock in a scope to disable power saving, for example when running a task that needs

@@ -95,12 +95,27 @@ void MappedInputManager::rememberTouchHeldTime() const {
 }
 
 bool MappedInputManager::wasScreenTapped(int& x, int& y) const {
+  if (debugTapPending) {
+    x = debugTapX;
+    y = debugTapY;
+    debugTapPending = false;
+    touchHeldOverrideValid = true;
+    touchHeldOverrideMs = 40;
+    touchHeldOverrideAt = millis();
+    return true;
+  }
   float nx = 0.0f;
   float ny = 0.0f;
   if (!gpio.wasTouchTap(nx, ny)) return false;
   renderer.tapToLogical(nx, ny, x, y);
   rememberTouchHeldTime();
   return true;
+}
+
+void MappedInputManager::injectDebugTap(const int x, const int y) {
+  debugTapX = std::max(0, std::min(x, static_cast<int>(renderer.getScreenWidth()) - 1));
+  debugTapY = std::max(0, std::min(y, static_cast<int>(renderer.getScreenHeight()) - 1));
+  debugTapPending = true;
 }
 
 bool MappedInputManager::wasScreenTouchDown(int& x, int& y) const {

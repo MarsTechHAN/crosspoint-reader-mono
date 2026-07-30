@@ -45,6 +45,7 @@ class HalDisplay {
   // baseline before the next differential update (the tiled grayscale cleanup
   // does). Panels without deferral fall back to a blocking refresh.
   void displayBufferAsync(RefreshMode mode = RefreshMode::FAST_REFRESH);
+  bool refreshBusy();
   // Block until a pending deferred refresh completes (no-op when none is).
   void waitRefreshComplete();
   // True when displayBufferAsync() genuinely overlaps (panel driver defers);
@@ -52,6 +53,7 @@ class HalDisplay {
   bool supportsAsyncRefresh() const;
   // Cancel optional work after the primary frame (four-gray refinement and
   // background ghost cleanup). An in-flight hardware waveform still finishes.
+  void beginDisplayWork();
   void abortPostRefresh();
   bool postRefreshAborted() const;
   void runMaintenance();

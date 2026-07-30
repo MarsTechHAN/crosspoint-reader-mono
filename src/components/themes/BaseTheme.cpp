@@ -67,7 +67,7 @@ void BaseTheme::drawBatteryLightningBolt(const GfxRenderer& renderer, int boltX,
 }
 
 void BaseTheme::fillBatteryIcon(const GfxRenderer& renderer, Rect rect, uint16_t percentage) const {
-  const bool charging = gpio.isUsbConnected();
+  const bool charging = powerManager.isCharging();
 
   const int maxFillWidth = rect.width - 5;
   const int fillHeight = rect.height - 4;

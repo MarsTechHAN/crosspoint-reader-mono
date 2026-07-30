@@ -223,6 +223,13 @@ void enterDeepSleep(bool fromTimeout = false) {
   deepSleepInProgress = true;
   activityManager.goToSleep(fromTimeout);
 
+#if FREEINK_DEVICE_PAPERMONO
+  // Custom/cover sleep screens may stage their four-gray refinement. Unlike a
+  // reading page, the retained sleep image has no later quiet-window callback:
+  // complete it synchronously before display.deepSleep() cuts the EPD rail.
+  renderer.runDisplayMaintenance();
+#endif
+
   if (isQuickResumeSleep) {
     saveSleepFrameBuffer();
   }
@@ -521,7 +528,7 @@ void loop() {
   // task. Signal it at the raw edge so four-gray refinement/background cleanup
   // can yield even before the current activity turns the gesture into a render.
   if (gpio.wasAnyPressed() || gpio.wasAnyReleased() || gpio.wasTouchActivity()) {
-    renderer.abortDisplayWork();
+    activityManager.noteUserInteraction();
   }
 #endif
   halTiltSensor.update(SETTINGS.tiltPageTurn, SETTINGS.orientation, activityManager.isReaderActivity());
@@ -547,6 +554,31 @@ void loop() {
         uint8_t* buf = display.getFrameBuffer();
         logSerial.write(buf, bufferSize);
         logSerial.printf("SCREENSHOT_END\n");
+      } else if (cmd.startsWith("TAP ")) {
+        int x = -1;
+        int y = -1;
+        if (sscanf(cmd.c_str() + 4, "%d %d", &x, &y) == 2) {
+          mappedInputManager.injectDebugTap(x, y);
+          activityManager.noteUserInteraction();
+          LOG_INF("INPUT", "Injected tap at logical (%d,%d)", x, y);
+        } else {
+          LOG_ERR("INPUT", "Usage: CMD:TAP <x> <y>");
+        }
+      } else if (cmd == "NEXT" || cmd == "PREV") {
+        const int x = cmd == "NEXT" ? renderer.getScreenWidth() * 5 / 6 : renderer.getScreenWidth() / 6;
+        const int y = renderer.getScreenHeight() / 2;
+        mappedInputManager.injectDebugTap(x, y);
+        activityManager.noteUserInteraction();
+        LOG_INF("INPUT", "Injected %s tap at logical (%d,%d)", cmd.c_str(), x, y);
+      } else if (cmd == "BATTERY") {
+        const BatteryMonitor::Status status = BatteryMonitor().readStatus();
+        logSerial.printf("BATTERY supported=%d percent=%d:%u mv=%d:%u ext=%d:%d charging=%d:%d vin=%ld usb=%ld src=%d\n",
+                         status.supported, status.percentageKnown, status.percentage, status.millivoltsKnown,
+                         status.millivolts, status.externalPowerKnown,
+                         status.externalPowerKnown ? status.externalPower : false,
+                         status.chargingKnown, status.chargingKnown ? status.charging : false,
+                         static_cast<long>(status.pm1VinMv), static_cast<long>(status.pm1VinOutMv),
+                         status.pm1PowerSource);
       }
     }
   }
@@ -623,11 +655,27 @@ void loop() {
     }
   }
 
-  // Refresh the battery icon when USB is plugged or unplugged.
-  // Placed after sleep guards so we never queue a render that won't be processed.
-  if (gpio.wasUsbStateChanged()) {
-    activityManager.requestUpdate();
+  // Refresh the battery icon from the same PMIC source used to draw it. Paper
+  // Mono's USB GPIO does not track PM1 VIN after unplug, so relying on the old
+  // GPIO edge leaves the charging badge latched indefinitely.
+#if FREEINK_DEVICE_PAPERMONO
+  static bool chargingStateInitialized = false;
+  static bool lastChargingState = false;
+  static unsigned long lastChargingPollMs = 0;
+  const unsigned long chargingNow = millis();
+  if (lastChargingPollMs == 0 || chargingNow - lastChargingPollMs >= HalPowerManager::BATTERY_POLL_MS) {
+    lastChargingPollMs = chargingNow;
+    const bool charging = powerManager.isCharging();
+    if (chargingStateInitialized && charging != lastChargingState) {
+      LOG_INF("PWR", "External power changed: charging=%d", charging);
+      activityManager.requestUpdate();
+    }
+    lastChargingState = charging;
+    chargingStateInitialized = true;
   }
+#else
+  if (gpio.wasUsbStateChanged()) activityManager.requestUpdate();
+#endif
 
   const unsigned long activityStartTime = millis();
   activityManager.loop();

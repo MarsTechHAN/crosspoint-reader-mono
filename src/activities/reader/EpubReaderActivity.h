@@ -1,9 +1,12 @@
 #pragma once
 #include <Epub.h>
 #include <Epub/FootnoteEntry.h>
+#include <Epub/Page.h>
 #include <Epub/Section.h>
 
 #include <optional>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 
 #include "BookmarkEntry.h"
 #include "EndOfBookOptions.h"
@@ -16,6 +19,12 @@ class EpubReaderActivity final : public Activity {
   std::unique_ptr<Section> section = nullptr;
   int currentSpineIndex = 0;
   int nextPageNumber = 0;
+  // Main-task input is a producer and the render task is the sole consumer.
+  // A bounded FIFO keeps currentPage immutable during page composition.
+  static constexpr UBaseType_t PAGE_TURN_QUEUE_DEPTH = 24;
+  StaticQueue_t pageTurnQueueStorage{};
+  uint8_t pageTurnQueueBytes[PAGE_TURN_QUEUE_DEPTH * sizeof(int8_t)]{};
+  QueueHandle_t pageTurnQueue = nullptr;
   std::optional<uint16_t> pendingPageJump;
   // Set when navigating to a footnote href with a fragment (e.g. #note1).
   // Cleared on the next render after the new section loads and resolves it to a page.
@@ -53,6 +62,16 @@ class EpubReaderActivity final : public Activity {
   // SD reads on the page-turn critical path. One attempt per position.
   int idlePrewarmSpine = -1;
   int idlePrewarmPage = -1;
+  std::unique_ptr<Page> prefetchedPage;
+  int prefetchedSpine = -1;
+  int prefetchedPageNumber = -1;
+  // Paper Mono renders both grayscale selector planes while the panel's B/W
+  // waveform is BUSY. These 48 KB blocks route to OPI PSRAM (>4 KB allocator
+  // threshold) and are retained for the reader lifetime to avoid per-page heap
+  // churn and redundant zero-initialization.
+  std::unique_ptr<uint8_t[]> grayLsbPlaneBuffer;
+  std::unique_ptr<uint8_t[]> grayMsbPlaneBuffer;
+  size_t grayPlaneBufferBytes = 0;
   unsigned long lastRenderCompleteMs = 0;
   bool bookmarkRemoved = false;  // true when last toggle removed (controls popup text)
   std::vector<BookmarkEntry> cachedBookmarks;
@@ -90,6 +109,9 @@ class EpubReaderActivity final : public Activity {
   int lastSavedSpineIndex = -1;
   int lastSavedPage = -1;
   int lastSavedPageCount = -1;
+  // Set only after the primary B/W waveform for renderContents() is committed.
+  // Obsolete FIFO generations must not churn progress storage.
+  bool lastPageDisplayCommitted = false;
 
   void renderContents(std::unique_ptr<Page> page, int orientedMarginTop, int orientedMarginRight,
                       int orientedMarginBottom, int orientedMarginLeft);
@@ -176,6 +198,8 @@ class EpubReaderActivity final : public Activity {
   void applyOrientation(uint8_t orientation);
   void toggleAutoPageTurn(uint8_t selectedPageTurnOption);
   void pageTurn(bool isForwardTurn);
+  void applyQueuedPageTurn(bool isForwardTurn);
+  void drainQueuedPageTurns();
   void loadCachedBookmarks();
   void addBookmark();
   void updateBookmarkFlag();
@@ -189,7 +213,14 @@ class EpubReaderActivity final : public Activity {
                               int initialRefreshCountdown)
       : Activity("EpubReader", renderer, mappedInput),
         epub(std::move(epub)),
-        pagesUntilFullRefresh(initialRefreshCountdown) {}
+        pagesUntilFullRefresh(initialRefreshCountdown) {
+    pageTurnQueue = xQueueCreateStatic(PAGE_TURN_QUEUE_DEPTH, sizeof(int8_t), pageTurnQueueBytes,
+                                       &pageTurnQueueStorage);
+    assert(pageTurnQueue != nullptr);
+  }
+  ~EpubReaderActivity() override {
+    if (pageTurnQueue) vQueueDelete(pageTurnQueue);
+  }
   void onEnter() override;
   void onExit() override;
   void loop() override;

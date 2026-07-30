@@ -116,7 +116,14 @@ inline bool isTouchMenuGesture(const MappedInputManager& input) {
 // renderer.waitRefreshComplete() and must rebuild the differential baseline
 // before the next page turn (the tiled grayscale cleanup does).
 inline void displayWithRefreshCycle(const GfxRenderer& renderer, int& pagesUntilFullRefresh, bool async = false) {
+#if FREEINK_DEVICE_PAPERMONO
+  // Paper Mono's FULL mode is the explicit black/white endpoint sweep. Keep
+  // the user-selected cadence meaningful instead of substituting a HALF
+  // differential update which cannot fully discharge accumulated ghosting.
+  const auto mode = (pagesUntilFullRefresh <= 1) ? HalDisplay::FULL_REFRESH : HalDisplay::FAST_REFRESH;
+#else
   const auto mode = (pagesUntilFullRefresh <= 1) ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH;
+#endif
   if (async) {
     renderer.displayBufferAsync(mode);
   } else {
