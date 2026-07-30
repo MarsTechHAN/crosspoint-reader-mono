@@ -58,6 +58,7 @@ class HalDisplay {
   bool postRefreshAborted() const;
   void runMaintenance();
   bool hasPendingMaintenance() const;
+  void controllerIdle();
   void refreshDisplay(RefreshMode mode = RefreshMode::FAST_REFRESH, bool turnOffScreen = false);
 
   // Power management

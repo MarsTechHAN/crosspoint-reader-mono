@@ -25,6 +25,9 @@ struct DirectPixelWriter {
   // (originY 0, clipRows panelHeight) so the clip doubles as a bounds guard.
   int originY;
   int clipRows;
+  bool logicalClipEnabled;
+  bool logicalRowVisible;
+  int logicalClipX0, logicalClipY0, logicalClipX1, logicalClipY1;
 
   // Orientation is collapsed into a linear transform:
   //   phyX = phyXBase + x * phyXStepX + y * phyXStepY
@@ -43,6 +46,12 @@ struct DirectPixelWriter {
     clipRows = renderer.getWriteRows();
     mode = renderer.getRenderMode();
     displayWidthBytes = renderer.getDisplayWidthBytes();
+    logicalClipEnabled = renderer.grayscaleClipEnabled() && mode >= GfxRenderer::GRAYSCALE_LSB;
+    logicalRowVisible = true;
+    logicalClipX0 = renderer.grayscaleClipX0();
+    logicalClipY0 = renderer.grayscaleClipY0();
+    logicalClipX1 = renderer.grayscaleClipX1();
+    logicalClipY1 = renderer.grayscaleClipY1();
 
     const int phyW = renderer.getDisplayWidth();
     const int phyH = renderer.getDisplayHeight();
@@ -101,6 +110,8 @@ struct DirectPixelWriter {
   inline void beginRow(int logicalY) {
     rowPhyXBase = phyXBase + logicalY * phyXStepY;
     rowPhyYBase = phyYBase + logicalY * phyYStepY;
+    logicalRowVisible = !logicalClipEnabled ||
+                        (logicalY >= logicalClipY0 && logicalY < logicalClipY1);
   }
 
   // For the current row (set via beginRow), narrow [colStart, colEnd) to the
@@ -116,6 +127,22 @@ struct DirectPixelWriter {
     assert(phyYStepX == 0 || phyYStepX == 1 || phyYStepX == -1);
     colStart = 0;
     colEnd = width;
+    if (!logicalRowVisible) {
+      colEnd = 0;
+      return;
+    }
+    if (logicalClipEnabled) {
+      const int clipStart = logicalClipX0 - xBase;
+      const int clipEnd = logicalClipX1 - xBase;
+      if (clipStart > colStart) colStart = clipStart;
+      if (clipEnd < colEnd) colEnd = clipEnd;
+      if (colStart < 0) colStart = 0;
+      if (colEnd > width) colEnd = width;
+      if (colStart >= colEnd) {
+        colEnd = colStart;
+        return;
+      }
+    }
     if (phyYStepX == 0) {
       // phyY is constant across the row: the whole row is in-band or out.
       const int sy = rowPhyYBase - originY;
@@ -147,6 +174,10 @@ struct DirectPixelWriter {
   // Must be called after beginRow() for the current row.
   // No bounds checking — caller guarantees coordinates are valid.
   inline void writePixel(int logicalX, uint8_t pixelValue) const {
+    if (!logicalRowVisible ||
+        (logicalClipEnabled && (logicalX < logicalClipX0 || logicalX >= logicalClipX1))) {
+      return;
+    }
     const bool dual = mode == GfxRenderer::GRAYSCALE_BOTH;
     // Determine whether to draw based on render mode
     bool draw;

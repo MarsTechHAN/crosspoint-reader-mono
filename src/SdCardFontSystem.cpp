@@ -21,17 +21,17 @@ void snapFontPointSizeTo(const uint8_t availablePointSize) {
   SETTINGS.saveToFile();
 }
 
-// Built-in UI fonts and their physical point sizes (at 150 DPI, matching the
-// SD-font converter). Each is paired with a same-size SD fallback so CJK UI
-// text matches the surrounding Latin. See SdCardFontSystem::setupUiFallbacks.
+// Built-in UI fonts and the optical CJK size used beside them. Han glyphs in
+// the available TrueType faces appear about 4 pt smaller than the bundled
+// Latin fonts, so UI fallback follows the same N+4 rule as the flash font.
 struct UiFontSize {
   int fontId;
-  uint8_t pointSize;
+  uint8_t cjkPointSize;
 };
 constexpr UiFontSize kUiFontSizes[] = {
-    {SMALL_FONT_ID, 8},
-    {UI_10_FONT_ID, 10},
-    {UI_12_FONT_ID, 12},
+    {SMALL_FONT_ID, 12},
+    {UI_10_FONT_ID, 14},
+    {UI_12_FONT_ID, 16},
 };
 
 }  // namespace
@@ -161,11 +161,11 @@ void SdCardFontSystem::setupUiFallbacks(GfxRenderer& renderer) {
   }
 
   for (const auto& ui : kUiFontSizes) {
-    const int sdFontId = manager_.loadFamilyExtraSize(*family, renderer, ui.pointSize);
+    const int sdFontId = manager_.loadFamilyExtraSize(*family, renderer, ui.cjkPointSize);
     if (sdFontId != 0) {
       renderer.setFallbackFont(ui.fontId, sdFontId);
     } else {
-      LOG_DBG("SDFS", "No %u pt SD glyphs for UI fallback in %s", ui.pointSize, familyName.c_str());
+      LOG_DBG("SDFS", "No %u pt SD glyphs for UI fallback in %s", ui.cjkPointSize, familyName.c_str());
     }
   }
 }

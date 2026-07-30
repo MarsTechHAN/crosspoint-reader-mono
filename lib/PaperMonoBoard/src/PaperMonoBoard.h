@@ -21,5 +21,6 @@ void disableTouch();
 void enableSd();
 void disableSd();
 void powerDownForSleep();
+void powerDownEpdForDeepSleepFallback();
 
 }  // namespace PaperMonoBoard

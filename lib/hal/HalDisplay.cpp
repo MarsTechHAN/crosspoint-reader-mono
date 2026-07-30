@@ -97,6 +97,8 @@ void HalDisplay::runMaintenance() { einkDisplay.runMaintenance(); }
 
 bool HalDisplay::hasPendingMaintenance() const { return einkDisplay.hasPendingMaintenance(); }
 
+void HalDisplay::controllerIdle() { einkDisplay.controllerIdle(); }
+
 void HalDisplay::refreshDisplay(HalDisplay::RefreshMode mode, bool turnOffScreen) {
   if (gpio.deviceIsX3() && mode == RefreshMode::HALF_REFRESH) {
     einkDisplay.requestResync(1);

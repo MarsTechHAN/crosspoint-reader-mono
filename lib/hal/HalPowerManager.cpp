@@ -82,16 +82,16 @@ void HalPowerManager::startDeepSleep(HalGPIO& gpio) const {
 #endif
 
 #if FREEINK_DEVICE_PAPERMONO
-  // Shut every switched peripheral down, then ask M5PM1 to remove system
-  // power. This is materially lower power than keeping the ESP32-S3 in deep
-  // sleep, and the PMIC's hardware power button brings the board back up.
-  PaperMonoBoard::powerDownForSleep();
+  // The display controller is already asleep and switched peripherals were
+  // quiesced immediately before it. Let M5PM1 collapse the system rails
+  // together; do not separately cut EPD power first.
   if (PaperMonoBoard::requestPowerOff()) {
     delay(1000);  // normally power disappears during this delay
   }
 
-  // A failed PMIC transaction must still leave the device asleep. Side-button
-  // wake is only a fallback; the normal path above is power-button wake.
+  // Reaching here means hard shutdown did not take effect. M5IOE1 remains
+  // alive in the fallback, so hold EPD reset low before cutting its rail.
+  PaperMonoBoard::powerDownEpdForDeepSleepFallback();
   pinMode(2, INPUT_PULLUP);
   pinMode(3, INPUT_PULLUP);
   while (digitalRead(2) == LOW || digitalRead(3) == LOW) delay(20);

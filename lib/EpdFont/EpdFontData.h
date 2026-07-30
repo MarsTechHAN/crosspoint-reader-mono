@@ -225,4 +225,8 @@ typedef struct {
 
   /// Optional dynamic kerning provider. Returns signed 4.4 fixed-point pixels.
   int8_t (*kerningHandler)(void* ctx, uint32_t leftCodepoint, uint32_t rightCodepoint);
+
+  /// Optional metrics-only advance provider for dynamically rasterized fonts.
+  /// Returns unsigned 12.4 fixed-point pixels without generating a bitmap.
+  uint16_t (*advanceHandler)(void* ctx, uint32_t codepoint);
 } EpdFontData;

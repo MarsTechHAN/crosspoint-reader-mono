@@ -89,6 +89,7 @@ bool FlashTtfFont::begin() {
     face.data.glyphBitmapHandler = loadBitmap;
     face.data.glyphBitmapBpp = 8;
     face.data.kerningHandler = kern;
+    face.data.advanceHandler = advance;
   }
 
   ready_ = true;
@@ -138,4 +139,10 @@ int8_t FlashTtfFont::kern(void* ctx, uint32_t leftCodepoint, uint32_t rightCodep
                                               freeink::book::StyleNone)
                     << fp4::FRAC_BITS;
   return static_cast<int8_t>(std::clamp(fixed, static_cast<int>(INT8_MIN), static_cast<int>(INT8_MAX)));
+}
+
+uint16_t FlashTtfFont::advance(void* ctx, uint32_t codepoint) {
+  auto& face = *static_cast<Face*>(ctx);
+  const int pixels = face.owner->ttf_.advance(codepoint, face.pixelSize, freeink::book::StyleNone);
+  return static_cast<uint16_t>(std::max(0, pixels) << fp4::FRAC_BITS);
 }

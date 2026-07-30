@@ -68,6 +68,11 @@ class ActivityManager {
   std::atomic<unsigned long> lastUpdateRequestedMs{0};
   std::atomic<uint32_t> updateSequence{0};
   std::atomic<uint32_t> interactionSequence{0};
+  // A raw input edge is handed from the main task to the active Activity. Keep
+  // controller maintenance gated across that handoff so release-based gestures
+  // cannot lose a race to a newly-started waveform.
+  std::atomic<bool> interactionDispatchPending{false};
+  std::atomic<bool> userInputActive{false};
   std::atomic<bool> displayControllerWorkActive{false};
   uint32_t waitingUpdateSequence = 0;
 
@@ -119,6 +124,8 @@ class ActivityManager {
   // Cancel optional panel work at the raw input edge and restart the deferred
   // maintenance quiet window without forcing an unnecessary UI render.
   void noteUserInteraction();
+  void setUserInputActive(bool active);
+  void finishUserInteractionDispatch();
 
   // Trigger a render and block until it completes.
   // Must NOT be called from the render task or while holding a RenderLock.

@@ -21,7 +21,11 @@ namespace {
 //      (lazy extraction: images are header-probed at build time and extracted on
 //      first render).
 // v33: Support <ruby> and <rt> tags. Skip <rp> tags
-constexpr uint8_t SECTION_FILE_VERSION = 33;
+// v34: TextBlock records whether its whole paragraph uses the CJK fallback,
+//      keeping digits/punctuation on the same font and metrics as CJK glyphs.
+// v35: Paper Mono's CJK fallback uses an optical +4 pt face, changing line
+//      measurement, wrapping and pagination for every CJK paragraph.
+constexpr uint8_t SECTION_FILE_VERSION = 35;
 // Written into the version field while a build is in progress; patched to
 // SECTION_FILE_VERSION only when the build is finalized. An abandoned /
 // crash-interrupted .bin therefore carries version 0, which loadSectionFile rejects

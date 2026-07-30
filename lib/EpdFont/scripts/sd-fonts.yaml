@@ -32,7 +32,7 @@
 #   Requires fonttools: pip install -r requirements.txt
 
 families:
-  # LXGW WenKai is the Chinese reading face used by EDCBook.  Pin the official
+  # LXGW WenKai is the selected Chinese reading face. Pin the official
   # release and checksums so generated .cpfont assets are reproducible.  Medium
   # serves bold; italic requests intentionally fall back to Regular/Medium.
   # License: SIL Open Font License 1.1

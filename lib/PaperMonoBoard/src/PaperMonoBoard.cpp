@@ -266,6 +266,13 @@ void powerDownForSleep() {
   fadeFrontlightTo(0, 260);
   disableTouch();
   disableSd();
+}
+
+void powerDownEpdForDeepSleepFallback() {
+  // The normal path is an M5PM1 hard shutdown. Keep EPD power present after
+  // the controller deep-sleep command and let the PMIC collapse the system
+  // rails together. This explicit reset-then-power-off sequence is only for
+  // the fallback, where M5IOE1 remains powered during ESP deep sleep.
   setEpdReset(false);
   setEpdPower(false);
 }

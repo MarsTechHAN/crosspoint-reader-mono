@@ -212,6 +212,24 @@ int GfxRenderer::resolveTextFontId(const int fontId, const char* text, const Epd
   return fontId;
 }
 
+int GfxRenderer::resolveParagraphFontId(const int primaryFontId, const std::vector<std::string>& words,
+                                        const std::vector<EpdFontFamily::Style>& styles) const {
+  const size_t count = std::min(words.size(), styles.size());
+  for (size_t i = 0; i < count; ++i) {
+    const int resolved = resolveTextFontId(primaryFontId, words[i].c_str(), styles[i]);
+    if (resolved != primaryFontId) return resolved;
+  }
+  return primaryFontId;
+}
+
+int GfxRenderer::getFallbackFontId(const int primaryFontId) const {
+  const auto fallback = fallbackFontMap_.find(primaryFontId);
+  if (fallback == fallbackFontMap_.end() || fontMap.find(fallback->second) == fontMap.end()) {
+    return primaryFontId;
+  }
+  return fallback->second;
+}
+
 // Translate logical (x,y) coordinates to physical panel coordinates based on current orientation
 // This should always be inlined for better performance
 static inline void rotateCoordinates(const GfxRenderer::Orientation orientation, const int x, const int y, int* phyX,
@@ -569,6 +587,10 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
 // IMPORTANT: This function is in critical rendering path and is called for every pixel. Please keep it as simple and
 // efficient as possible.
 void GfxRenderer::drawPixel(const int x, const int y, const bool state) const {
+  if (_grayscaleClipEnabled && renderMode >= GRAYSCALE_LSB &&
+      (x < _grayscaleClipX0 || x >= _grayscaleClipX1 || y < _grayscaleClipY0 || y >= _grayscaleClipY1)) {
+    return;
+  }
   int phyX = 0;
   int phyY = 0;
 
@@ -606,6 +628,10 @@ void GfxRenderer::drawPixel(const int x, const int y, const bool state) const {
 
 void GfxRenderer::drawGrayPixel(const int x, const int y, const bool lsb, const bool msb) const {
   if ((!lsb && !msb) || !_stripActive || !_stripBufSecondary) return;
+  if (_grayscaleClipEnabled &&
+      (x < _grayscaleClipX0 || x >= _grayscaleClipX1 || y < _grayscaleClipY0 || y >= _grayscaleClipY1)) {
+    return;
+  }
 
   int phyX = 0;
   int phyY = 0;
@@ -992,10 +1018,16 @@ void GfxRenderer::fillRectImpl(const int x, const int y, const int width, const 
   // Clip in logical space.
   const int screenW = getScreenWidth();
   const int screenH = getScreenHeight();
-  const int lx0 = std::max(0, x);
-  const int ly0 = std::max(0, y);
-  const int lx1 = std::min(screenW, x + width);
-  const int ly1 = std::min(screenH, y + height);
+  int lx0 = std::max(0, x);
+  int ly0 = std::max(0, y);
+  int lx1 = std::min(screenW, x + width);
+  int ly1 = std::min(screenH, y + height);
+  if (_grayscaleClipEnabled && renderMode >= GRAYSCALE_LSB) {
+    lx0 = std::max(lx0, _grayscaleClipX0);
+    ly0 = std::max(ly0, _grayscaleClipY0);
+    lx1 = std::min(lx1, _grayscaleClipX1);
+    ly1 = std::min(ly1, _grayscaleClipY1);
+  }
   if (lx0 >= lx1 || ly0 >= ly1) return;
 
   // Rotate the two opposing logical corners into physical-framebuffer space.
@@ -1618,6 +1650,14 @@ void GfxRenderer::beginDualStripTarget(uint8_t* lsb, uint8_t* msb, int stripY0, 
   _stripActive = true;
 }
 
+void GfxRenderer::setGrayscaleClipRect(const int x, const int y, const int width, const int height) const {
+  _grayscaleClipX0 = std::max(0, x);
+  _grayscaleClipY0 = std::max(0, y);
+  _grayscaleClipX1 = std::min(getScreenWidth(), x + std::max(0, width));
+  _grayscaleClipY1 = std::min(getScreenHeight(), y + std::max(0, height));
+  _grayscaleClipEnabled = _grayscaleClipX0 < _grayscaleClipX1 && _grayscaleClipY0 < _grayscaleClipY1;
+}
+
 void GfxRenderer::endStripTarget() const {
   _stripActive = false;
   _stripBuf = nullptr;
@@ -1678,6 +1718,8 @@ bool GfxRenderer::displayWorkAborted() const { return display.postRefreshAborted
 void GfxRenderer::runDisplayMaintenance() const { display.runMaintenance(); }
 
 bool GfxRenderer::hasPendingDisplayMaintenance() const { return display.hasPendingMaintenance(); }
+
+void GfxRenderer::displayControllerIdle() const { display.controllerIdle(); }
 
 size_t GfxRenderer::readFramebufferRegion(int x, int y, int w, int h, uint8_t* dst, size_t dstCapacity) const {
   if (dst == nullptr || w <= 0 || h <= 0) return 0;
@@ -1951,6 +1993,10 @@ int GfxRenderer::getSpaceWidth(const int fontId, const EpdFontFamily::Style styl
     return 0;
   }
 
+  const EpdFontData* data = fontIt->second.getData(style);
+  if (data->advanceHandler) {
+    return fp4::toPixel(data->advanceHandler(data->glyphMissCtx, ' '));
+  }
   const EpdGlyph* spaceGlyph = fontIt->second.getGlyph(' ', style);
   return spaceGlyph ? fp4::toPixel(spaceGlyph->advanceX) : 0;  // snap 12.4 fixed-point to nearest pixel
 }
@@ -1969,8 +2015,11 @@ int GfxRenderer::getSpaceAdvance(const int fontId, const uint32_t leftCp, const 
   const auto fontIt = fontMap.find(fontId);
   if (fontIt == fontMap.end()) return 0;
   const auto& font = fontIt->second;
-  const EpdGlyph* spaceGlyph = font.getGlyph(' ', style);
-  const int32_t spaceAdvanceFP = spaceGlyph ? static_cast<int32_t>(spaceGlyph->advanceX) : 0;
+  const EpdFontData* data = font.getData(style);
+  const EpdGlyph* spaceGlyph = data->advanceHandler ? nullptr : font.getGlyph(' ', style);
+  const int32_t spaceAdvanceFP = data->advanceHandler
+                                     ? static_cast<int32_t>(data->advanceHandler(data->glyphMissCtx, ' '))
+                                     : (spaceGlyph ? static_cast<int32_t>(spaceGlyph->advanceX) : 0);
   // Combine space advance + flanking kern into one fixed-point sum before snapping.
   // Snapping the combined value avoids the +/-1 px error from snapping each component separately.
   const int32_t kernFP = static_cast<int32_t>(font.getKerning(leftCp, ' ', style)) +
@@ -2038,6 +2087,7 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, EpdFontFami
   int widthPx = 0;
   int32_t prevAdvanceFP = 0;  // 12.4 fixed-point: prev glyph's advance + next kern for snap
   const auto& font = fontIt->second;
+  const EpdFontData* data = font.getData(style);
   while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&text)))) {
     // RTL vowel marks (niqqud/harakat) are zero-advance overlays in drawText — no width.
     if (BidiUtils::isTransparentMark(cp)) {
@@ -2055,8 +2105,12 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, EpdFontFami
       widthPx += fp4::toPixel(prevAdvanceFP + kernFP);         // snap 12.4 fixed-point to nearest pixel
     }
 
-    const EpdGlyph* glyph = font.getGlyph(cp, style);
-    prevAdvanceFP = glyph ? glyph->advanceX : 0;
+    if (data->advanceHandler) {
+      prevAdvanceFP = data->advanceHandler(data->glyphMissCtx, cp);
+    } else {
+      const EpdGlyph* glyph = font.getGlyph(cp, style);
+      prevAdvanceFP = glyph ? glyph->advanceX : 0;
+    }
     if ((style & (EpdFontFamily::SUP | EpdFontFamily::SUB)) != 0) {
       prevAdvanceFP = (prevAdvanceFP + 1) / 2;
     }

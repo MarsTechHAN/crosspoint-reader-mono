@@ -89,6 +89,15 @@ void ActivityManager::renderTaskLoop() {
         if (waiter) xTaskNotify(waiter, 1, eIncrement);
       }
 
+      // render() may request a follow-up frame (home cover completion, async
+      // data becoming ready, etc.) without notifying this task until the main
+      // loop drains requestedUpdate. updateSequence is already authoritative,
+      // so consume that foreground frame now. Treating this window as idle
+      // inserted a deghost waveform between two halves of one UI transition.
+      if (updateSequence.load() != renderedSequence) {
+        continue;
+      }
+
       const uint32_t quietInteraction = interactionSequence.load();
       const uint32_t quietUpdate = updateSequence.load();
       if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(DISPLAY_MAINTENANCE_QUIET_MS)) > 0) {
@@ -98,7 +107,30 @@ void ActivityManager::renderTaskLoop() {
         continue;
       }
 
+      // Touch taps are classified on release by the main task. A press may
+      // arrive while a waveform is BUSY, and after BUSY clears there is a
+      // narrow handoff before the release becomes a page-turn request. Do not
+      // start deghost or spend 140 ms powering the controller off in that
+      // window. finishUserInteractionDispatch() wakes us after the Activity
+      // has either queued the next frame or consumed the gesture.
+      if (userInputActive.load() || interactionDispatchPending.load()) {
+        break;
+      }
+
       if (!renderer.hasPendingDisplayMaintenance()) {
+        // This render task is the sole SPI/controller consumer. Recheck both
+        // generations before declaring the queue idle, then let Paper Mono
+        // shut down analog/clock domains retained across adjacent waveforms.
+        if (interactionSequence.load() != quietInteraction || updateSequence.load() != quietUpdate) {
+          continue;
+        }
+        {
+          HalPowerManager::Lock powerLock;
+          renderer.displayControllerIdle();
+        }
+        if (interactionSequence.load() != quietInteraction || updateSequence.load() != quietUpdate) {
+          continue;
+        }
         if (renderStarted != 0) {
           LOG_DBG("ACT", "Render complete: seq=%lu foreground=%lums maintenance=0ms",
                   static_cast<unsigned long>(sequence), foregroundDone - renderStarted);
@@ -361,9 +393,21 @@ void ActivityManager::requestUpdate(bool immediate) {
 }
 
 void ActivityManager::noteUserInteraction() {
+  interactionDispatchPending.store(true);
   renderer.abortDisplayWork();
   interactionSequence.fetch_add(1);
   if (renderTaskHandle) xTaskNotify(renderTaskHandle, 1, eIncrement);
+}
+
+void ActivityManager::setUserInputActive(const bool active) {
+  const bool previous = userInputActive.exchange(active);
+  if (previous != active && renderTaskHandle) xTaskNotify(renderTaskHandle, 1, eIncrement);
+}
+
+void ActivityManager::finishUserInteractionDispatch() {
+  if (interactionDispatchPending.exchange(false) && renderTaskHandle) {
+    xTaskNotify(renderTaskHandle, 1, eIncrement);
+  }
 }
 
 void ActivityManager::requestUpdateAndWait() {

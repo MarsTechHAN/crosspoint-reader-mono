@@ -87,12 +87,17 @@ class GfxRenderer {
   mutable int _stripY0 = 0;
   mutable int _stripRows = 0;
   mutable bool _stripActive = false;
+  mutable bool _grayscaleClipEnabled = false;
+  mutable int _grayscaleClipX0 = 0;
+  mutable int _grayscaleClipY0 = 0;
+  mutable int _grayscaleClipX1 = 0;
+  mutable int _grayscaleClipY1 = 0;
 
-  // CJK UI font fallback map: primary (built-in, Latin-only) UI font id -> a
-  // size-matched SD-card font id that carries CJK glyphs. When a string drawn
+  // CJK UI font fallback map: primary (built-in, Latin-only) UI font id -> an
+  // optically adjusted SD-card font id that carries CJK glyphs. When a string drawn
   // or measured with a mapped primary font contains a CJK codepoint the primary
   // cannot render, the whole string is routed to the mapped fallback so it
-  // appears at the same point size as the surrounding UI text. Populated by the
+  // appears at a comparable visual size to the surrounding UI text. Populated by the
   // app-level SD font setup when an SD family is loaded. See resolveTextFontId().
   std::map<int, int> fallbackFontMap_;
   std::map<int, int> builtinFallbackFontMap_;
@@ -156,14 +161,23 @@ class GfxRenderer {
   }
   const std::map<int, SdCardFont*>& getSdCardFonts() const { return sdCardFonts_; }
   bool isSdCardFont(int fontId) const { return sdCardFonts_.count(fontId) > 0; }
-  // Register/clear size-matched CJK UI fallbacks (see fallbackFontMap_).
-  // setFallbackFont maps a primary UI font id to an SD font id of the same size.
+  // Register/clear optically adjusted CJK UI fallbacks (see fallbackFontMap_).
   void setFallbackFont(int primaryFontId, int fallbackFontId) { fallbackFontMap_[primaryFontId] = fallbackFontId; }
   void setBuiltinFallbackFont(int primaryFontId, int fallbackFontId) {
     builtinFallbackFontMap_[primaryFontId] = fallbackFontId;
     fallbackFontMap_[primaryFontId] = fallbackFontId;
   }
   void clearFallbackFonts() { fallbackFontMap_ = builtinFallbackFontMap_; }
+  // Resolve one font for an entire paragraph. EPUB layout splits CJK text,
+  // punctuation and digits into separate tokens; resolving each token in
+  // isolation makes the CJK glyphs use the fallback while ASCII digits stay
+  // in the primary font. A paragraph-level decision keeps measurement and
+  // rendering on one set of metrics.
+  int resolveParagraphFontId(int primaryFontId, const std::vector<std::string>& words,
+                             const std::vector<EpdFontFamily::Style>& styles) const;
+  // Return the currently registered fallback for a primary font, or the
+  // primary itself when no usable fallback is loaded.
+  int getFallbackFontId(int primaryFontId) const;
   // Ensure SD card font glyph data is loaded for the given text. Called from layout code
   // (which holds a const GfxRenderer&) before measuring word widths. Safe to call on non-SD fonts (no-op).
   // styleMask: bitmask of styles to prepare (bit 0=regular, 1=bold, 2=italic, 3=bold-italic).
@@ -200,6 +214,7 @@ class GfxRenderer {
   bool displayWorkAborted() const;
   void runDisplayMaintenance() const;
   bool hasPendingDisplayMaintenance() const;
+  void displayControllerIdle() const;
   // EXPERIMENTAL: Windowed update - display only a rectangular region
   // void displayWindow(int x, int y, int width, int height) const;
   void invertScreen() const;
@@ -215,6 +230,13 @@ class GfxRenderer {
   void beginStripTarget(uint8_t* scratch, int stripY0, int stripRows) const;
   void beginDualStripTarget(uint8_t* lsb, uint8_t* msb, int stripY0, int stripRows) const;
   void endStripTarget() const;
+  void setGrayscaleClipRect(int x, int y, int width, int height) const;
+  void clearGrayscaleClipRect() const { _grayscaleClipEnabled = false; }
+  bool grayscaleClipEnabled() const { return _grayscaleClipEnabled; }
+  int grayscaleClipX0() const { return _grayscaleClipX0; }
+  int grayscaleClipY0() const { return _grayscaleClipY0; }
+  int grayscaleClipX1() const { return _grayscaleClipX1; }
+  int grayscaleClipY1() const { return _grayscaleClipY1; }
 
   // Band culling for tiled grayscale. Takes a glyph bounding box in logical
   // screen coords and returns false only when a strip is active AND the box's

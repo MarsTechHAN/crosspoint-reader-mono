@@ -251,6 +251,12 @@ void enterDeepSleep(bool fromTimeout = false) {
   }
 
   halTiltSensor.deepSleep();
+#if FREEINK_DEVICE_PAPERMONO
+  // Match the board's hard-off order: extinguish the frontlight and quiesce
+  // switched peripherals before putting the panel controller to sleep. No
+  // further board-bus traffic is needed before the PMIC shutdown command.
+  PaperMonoBoard::powerDownForSleep();
+#endif
   display.deepSleep();
   LOG_DBG("MAIN", "Entering deep sleep");
 
@@ -290,19 +296,22 @@ void setupDisplayAndFonts(bool seamless = false) {
       renderer.insertFont(builtinCjkFontId(pointSize), EpdFontFamily(builtinCjkFont.font(pointSize)));
     }
 
-    renderer.setBuiltinFallbackFont(SMALL_FONT_ID, BUILTIN_CJK_8_FONT_ID);
-    renderer.setBuiltinFallbackFont(UI_10_FONT_ID, BUILTIN_CJK_10_FONT_ID);
-    renderer.setBuiltinFallbackFont(UI_12_FONT_ID, BUILTIN_CJK_12_FONT_ID);
+    // LXGW WenKai's Han em box appears optically smaller than the bundled
+    // Latin faces at the same nominal point size. Route every built-in CJK
+    // fallback to N+4 pt; measurement and drawing resolve through this same ID.
+    renderer.setBuiltinFallbackFont(SMALL_FONT_ID, BUILTIN_CJK_12_FONT_ID);
+    renderer.setBuiltinFallbackFont(UI_10_FONT_ID, BUILTIN_CJK_14_FONT_ID);
+    renderer.setBuiltinFallbackFont(UI_12_FONT_ID, BUILTIN_CJK_16_FONT_ID);
 #ifndef OMIT_FONTS
-    renderer.setBuiltinFallbackFont(NOTOSERIF_12_FONT_ID, BUILTIN_CJK_12_FONT_ID);
-    renderer.setBuiltinFallbackFont(NOTOSERIF_16_FONT_ID, BUILTIN_CJK_16_FONT_ID);
-    renderer.setBuiltinFallbackFont(NOTOSERIF_18_FONT_ID, BUILTIN_CJK_18_FONT_ID);
-    renderer.setBuiltinFallbackFont(NOTOSANS_12_FONT_ID, BUILTIN_CJK_12_FONT_ID);
-    renderer.setBuiltinFallbackFont(NOTOSANS_14_FONT_ID, BUILTIN_CJK_14_FONT_ID);
-    renderer.setBuiltinFallbackFont(NOTOSANS_16_FONT_ID, BUILTIN_CJK_16_FONT_ID);
-    renderer.setBuiltinFallbackFont(NOTOSANS_18_FONT_ID, BUILTIN_CJK_18_FONT_ID);
+    renderer.setBuiltinFallbackFont(NOTOSERIF_12_FONT_ID, BUILTIN_CJK_16_FONT_ID);
+    renderer.setBuiltinFallbackFont(NOTOSERIF_16_FONT_ID, BUILTIN_CJK_20_FONT_ID);
+    renderer.setBuiltinFallbackFont(NOTOSERIF_18_FONT_ID, BUILTIN_CJK_22_FONT_ID);
+    renderer.setBuiltinFallbackFont(NOTOSANS_12_FONT_ID, BUILTIN_CJK_16_FONT_ID);
+    renderer.setBuiltinFallbackFont(NOTOSANS_14_FONT_ID, BUILTIN_CJK_18_FONT_ID);
+    renderer.setBuiltinFallbackFont(NOTOSANS_16_FONT_ID, BUILTIN_CJK_20_FONT_ID);
+    renderer.setBuiltinFallbackFont(NOTOSANS_18_FONT_ID, BUILTIN_CJK_22_FONT_ID);
 #endif
-    renderer.setBuiltinFallbackFont(NOTOSERIF_14_FONT_ID, BUILTIN_CJK_14_FONT_ID);
+    renderer.setBuiltinFallbackFont(NOTOSERIF_14_FONT_ID, BUILTIN_CJK_18_FONT_ID);
   }
 #endif
 
@@ -558,9 +567,18 @@ void loop() {
   // Input is sampled on the main task while display work runs on the render
   // task. Signal it at the raw edge so four-gray refinement/background cleanup
   // can yield even before the current activity turns the gesture into a render.
-  if (gpio.wasAnyPressed() || gpio.wasAnyReleased() || gpio.wasTouchActivity()) {
+  const bool rawInputActivity = gpio.wasAnyPressed() || gpio.wasAnyReleased() || gpio.wasTouchActivity();
+  if (rawInputActivity) {
     activityManager.noteUserInteraction();
   }
+  bool rawInputActive = false;
+  for (uint8_t button = HalGPIO::BTN_BACK; button <= HalGPIO::BTN_POWER; ++button) {
+    rawInputActive = rawInputActive || gpio.isPressed(button);
+  }
+  float touchX = 0.0f;
+  float touchY = 0.0f;
+  rawInputActive = rawInputActive || gpio.isTouchHeldAt(touchX, touchY);
+  activityManager.setUserInputActive(rawInputActive);
 #endif
   halTiltSensor.update(SETTINGS.tiltPageTurn, SETTINGS.orientation, activityManager.isReaderActivity());
 
@@ -730,6 +748,12 @@ void loop() {
 
   const unsigned long activityStartTime = millis();
   activityManager.loop();
+#if FREEINK_DEVICE_PAPERMONO
+  // The Activity has now consumed this iteration's press/release snapshot and
+  // queued any resulting frame. Let the controller worker re-evaluate the
+  // foreground queue before it considers background maintenance or power-off.
+  activityManager.finishUserInteractionDispatch();
+#endif
   const unsigned long activityDuration = millis() - activityStartTime;
 
   const unsigned long loopDuration = millis() - loopStartTime;

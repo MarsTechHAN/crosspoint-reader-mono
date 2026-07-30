@@ -561,12 +561,19 @@ void ParsedText::layoutAndExtractLines(const GfxRenderer& renderer, const int fo
       blockStyle.alignment == CssTextAlign::Justify ||
       (blockStyle.isRtl ? blockStyle.alignment == CssTextAlign::Right : blockStyle.alignment == CssTextAlign::Left);
 
+  // CJK paragraphs must use one font for every token, including digits and
+  // punctuation. Per-token fallback would measure CJK in the flash TrueType
+  // fallback but leave ASCII tokens in the Latin primary, producing visibly
+  // mixed glyphs and subtly inconsistent line positions.
+  const int paragraphFontId = hasCjkWord ? renderer.resolveParagraphFontId(fontId, words, wordStyles) : fontId;
+  const bool useCjkFallback = paragraphFontId != fontId;
+
   // Ensure SD card font glyph metrics are loaded before measuring word widths.
   // For flash-based fonts isSdCardFont() returns false and this block is skipped
   // entirely — no heap allocation. For SD card fonts this reads glyph metadata
   // (advanceX only, no bitmaps) for all unique codepoints in this paragraph so
   // that calculateWordWidths() can measure text without on-demand SD I/O.
-  if (renderer.isSdCardFont(fontId)) {
+  if (renderer.isSdCardFont(paragraphFontId)) {
     // Style mask: only ask the SD font to load advances for styles actually
     // used in this paragraph. Style index is the low two bits (regular/bold/
     // italic/bold-italic); the underline bit is irrelevant to advance metrics.
@@ -575,25 +582,26 @@ void ParsedText::layoutAndExtractLines(const GfxRenderer& renderer, const int fo
       styleMask |= static_cast<uint8_t>(1u << (static_cast<uint8_t>(s) & 0x03));
     }
     if (styleMask == 0) styleMask = 0x01;  // defensive: regular only
-    renderer.ensureSdCardFontReady(fontId, words, hyphenationEnabled, styleMask);
+    renderer.ensureSdCardFontReady(paragraphFontId, words, hyphenationEnabled, styleMask);
   }
 
   const int pageWidth = viewportWidth;
-  auto wordWidths = calculateWordWidths(renderer, fontId);
+  auto wordWidths = calculateWordWidths(renderer, paragraphFontId);
 
   std::vector<size_t> lineBreakIndices;
   if (hyphenationEnabled) {
     // Use greedy layout that can split words mid-loop when a hyphenated prefix fits.
     lineBreakIndices =
-        computeHyphenatedLineBreaks(renderer, fontId, pageWidth, wordWidths, wordContinues, wordNoSpaceBefore);
+        computeHyphenatedLineBreaks(renderer, paragraphFontId, pageWidth, wordWidths, wordContinues, wordNoSpaceBefore);
   } else {
-    lineBreakIndices = computeLineBreaks(renderer, fontId, pageWidth, wordWidths, wordContinues, wordNoSpaceBefore);
+    lineBreakIndices =
+        computeLineBreaks(renderer, paragraphFontId, pageWidth, wordWidths, wordContinues, wordNoSpaceBefore);
   }
   const size_t lineCount = includeLastLine ? lineBreakIndices.size() : lineBreakIndices.size() - 1;
 
   for (size_t i = 0; i < lineCount; ++i) {
     extractLine(i, pageWidth, wordWidths, wordContinues, wordNoSpaceBefore, lineBreakIndices, processLine, renderer,
-                fontId);
+                paragraphFontId, useCjkFallback);
   }
 
   // Remove consumed words so size() reflects only remaining words
@@ -1083,7 +1091,7 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
                              const std::vector<bool>& continuesVec, const std::vector<bool>& noSpaceBeforeVec,
                              const std::vector<size_t>& lineBreakIndices,
                              const std::function<void(std::shared_ptr<TextBlock>)>& processLine,
-                             const GfxRenderer& renderer, const int fontId) {
+                             const GfxRenderer& renderer, const int fontId, const bool useCjkFallback) {
   const size_t lineBreak = lineBreakIndices[breakIndex];
   const size_t lastBreakAt = breakIndex > 0 ? lineBreakIndices[breakIndex - 1] : 0;
   const size_t lineWordCount = lineBreak - lastBreakAt;
@@ -1156,7 +1164,7 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
                            actualGapCount >= MIN_JUSTIFY_GAPS && spareSpace > 0;
   const int justifyExtra = justifyLine ? computeJustifyExtra(spareSpace, actualGapCount) : 0;
   // Integer division used to discard up to gapCount-1 pixels, leaving the
-  // right edge visibly ragged on CJK-heavy lines. Match EDCBook's pixel-exact
+  // right edge visibly ragged on CJK-heavy lines. Use pixel-exact
   // layout: distribute the remainder one pixel at a time across early visual
   // gaps. This also handles spareSpace < gapCount (base=0) correctly.
   const size_t justifyRemainder = justifyLine ? static_cast<size_t>(spareSpace % actualGapCount) : 0;
@@ -1408,7 +1416,8 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
   if (!lineHasFocusSplit) {
     // TextBlock flattens the vectors into its arena; they stay owned here and die at return.
     auto block = std::make_shared<TextBlock>(lineWords, lineXPos, lineWordStyles, std::vector<uint8_t>{},
-                                             std::vector<uint16_t>{}, blockStyle, std::move(lineRubyTexts));
+                                             std::vector<uint16_t>{}, blockStyle, std::move(lineRubyTexts),
+                                             useCjkFallback);
     if (!block->valid()) {
       LOG_ERR("PTX", "Dropping line: TextBlock arena allocation failed");
       return;
@@ -1462,7 +1471,7 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
   }
 
   auto block = std::make_shared<TextBlock>(outWords, outXPos, outStyles, outBoundaries, outSuffixX, blockStyle,
-                                           std::move(outRubyTexts));
+                                           std::move(outRubyTexts), useCjkFallback);
   if (!block->valid()) {
     LOG_ERR("PTX", "Dropping line: TextBlock arena allocation failed");
     return;

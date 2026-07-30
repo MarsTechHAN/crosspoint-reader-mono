@@ -1482,15 +1482,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   // Only persist when the position actually changed. render() also runs on menu,
   // bookmark and screenshot re-renders, and writeAtomic is several FAT ops for 6 bytes.
   // Every real page turn changes currentPage, so progress durability is unaffected.
-  if (lastPageDisplayCommitted &&
-      (currentSpineIndex != lastSavedSpineIndex || section->currentPage != lastSavedPage ||
-       section->pageCount != lastSavedPageCount)) {
-    if (saveProgress(currentSpineIndex, section->currentPage, section->estimatedTotalPages())) {
-      lastSavedSpineIndex = currentSpineIndex;
-      lastSavedPage = section->currentPage;
-      lastSavedPageCount = section->estimatedTotalPages();
-    }
-  }
+  saveProgressIfNeeded();
 
   showPendingSyncSaveError();
 
@@ -1535,6 +1527,19 @@ bool EpubReaderActivity::applyDeferredReposition() {
 bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageCount) {
   return EpubReaderUtils::saveProgress(*epub, spineIndex, currentPage, pageCount);
 }
+
+void EpubReaderActivity::saveProgressIfNeeded() {
+  if (!lastPageDisplayCommitted || !section ||
+      (currentSpineIndex == lastSavedSpineIndex && section->currentPage == lastSavedPage)) {
+    return;
+  }
+  const int estimatedPageCount = section->estimatedTotalPages();
+  if (saveProgress(currentSpineIndex, section->currentPage, estimatedPageCount)) {
+    lastSavedSpineIndex = currentSpineIndex;
+    lastSavedPage = section->currentPage;
+    lastSavedPageCount = estimatedPageCount;
+  }
+}
 void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int orientedMarginTop,
                                         const int orientedMarginRight, const int orientedMarginBottom,
                                         const int orientedMarginLeft) {
@@ -1566,6 +1571,20 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   const bool needsTextGrayscale = SETTINGS.textAntiAliasing;
   const bool needsAnyGrayscale = needsTextGrayscale || pageHasImages;
   const bool tiledGrayscale = needsAnyGrayscale && renderer.supportsStripGrayscale();
+  struct GrayscaleClipGuard {
+    GfxRenderer& renderer;
+    bool active;
+    ~GrayscaleClipGuard() {
+      if (active) renderer.clearGrayscaleClipRect();
+    }
+  } grayscaleClipGuard{renderer, needsAnyGrayscale};
+  if (needsAnyGrayscale) {
+    renderer.setGrayscaleClipRect(orientedMarginLeft, orientedMarginTop,
+                                  renderer.getScreenWidth() - orientedMarginLeft - orientedMarginRight,
+                                  renderer.getScreenHeight() - orientedMarginTop - orientedMarginBottom);
+    LOG_DBG("ERS", "Four-gray clip: x=%d..%d y=%d..%d", renderer.grayscaleClipX0(),
+            renderer.grayscaleClipX1(), renderer.grayscaleClipY0(), renderer.grayscaleClipY1());
+  }
   // Keep the panel busy while both selector planes are composed. This applies
   // to image pages too: their decoded pixel cache can now feed full PSRAM
   // planes in one pass instead of forcing a blocking double-refresh pipeline.
@@ -1595,6 +1614,9 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   if (manualRefreshPending) pagesUntilFullRefresh = 1;
   ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh, overlapRefresh);
   lastPageDisplayCommitted = true;
+  // FAT metadata work takes about 20 ms. On ordinary async page turns, perform
+  // it while the panel is already BUSY instead of delaying the gray waveform.
+  saveProgressIfNeeded();
   const auto tDisplay = millis();
 
   // Tiled grayscale leaves the BW framebuffer intact so no full-frame
@@ -1694,7 +1716,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
       }
       const auto tGrayStage = millis();
 
-      // EDCBook starts preparing its adjacent page while the panel is BUSY.
+      // Start preparing the adjacent page while the panel is BUSY.
       // Do the same here, but retain only the deserialized Page and leave glyph
       // I/O to the normal idle prewarm. The BUSY check ensures this work only
       // consumes otherwise-dead waveform time; generous heap gates avoid
