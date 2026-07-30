@@ -230,45 +230,51 @@ void HomeActivity::loop() {
     return;
   }
 
-  int tx = 0;
-  int ty = 0;
-  if (!recentBooks.empty() && mappedInput.wasScreenTouchDown(tx, ty) && tx >= 0 && tx < renderer.getScreenWidth() &&
-      ty >= metrics.homeTopPadding && ty < metrics.homeTopPadding + metrics.homeCoverTileHeight) {
-    if (selectorIndex != 0) {
-      selectorIndex = 0;
-      requestUpdate();
-    }
-    return;
-  }
-
-  if (!recentBooks.empty() &&
-      mappedInput.wasTapInRect(0, metrics.homeTopPadding, renderer.getScreenWidth(), metrics.homeCoverTileHeight)) {
-    selectorIndex = 0;
-    activateSelection();
-    return;
-  }
-
   const int menuTop = metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset;
-  const int renderedMenuSelection =
-      metrics.homeContinueReadingInMenu ? selectorIndex : selectorIndex - recentBooks.size();
   const int renderedMenuCount =
       menuCount - (metrics.homeContinueReadingInMenu ? 0 : static_cast<int>(recentBooks.size()));
-  int menuRow = -1;
-  const auto menuTouch = mappedInput.rowTouch(menuRow, menuTop, metrics.menuRowHeight + metrics.menuSpacing,
-                                              renderedMenuCount, 0, INT32_MAX, metrics.menuRowHeight);
-  if (menuTouch != MappedInputManager::RowTouch::None) {
-    const int touchedIndex =
-        metrics.homeContinueReadingInMenu ? menuRow : menuRow + static_cast<int>(recentBooks.size());
-    if (menuTouch == MappedInputManager::RowTouch::Down) {
-      if (selectorIndex != touchedIndex) {
-        selectorIndex = touchedIndex;
+  const int menuRowStep = metrics.menuRowHeight + metrics.menuSpacing;
+  const auto routeTouchPoint = [&](const int x, const int y, const bool activate) {
+    if (!recentBooks.empty() && x >= 0 && x < renderer.getScreenWidth() && y >= metrics.homeTopPadding &&
+        y < metrics.homeTopPadding + metrics.homeCoverTileHeight) {
+      if (activate) {
+        selectorIndex = 0;
+        activateSelection();
+      } else if (selectorIndex != 0) {
+        selectorIndex = 0;
         requestUpdate();
       }
-    } else {
+      return true;
+    }
+
+    if (x < 0 || x >= renderer.getScreenWidth() || y < menuTop || menuRowStep <= 0) return false;
+    const int menuRow = (y - menuTop) / menuRowStep;
+    if (menuRow < 0 || menuRow >= renderedMenuCount || (y - menuTop) % menuRowStep >= metrics.menuRowHeight) {
+      return false;
+    }
+    const int touchedIndex = metrics.homeContinueReadingInMenu
+                                 ? menuRow
+                                 : menuRow + static_cast<int>(recentBooks.size());
+    if (activate) {
       selectorIndex = touchedIndex;
       activateSelection();
+    } else if (selectorIndex != touchedIndex) {
+      selectorIndex = touchedIndex;
+      requestUpdate();
     }
-    return;
+    return true;
+  };
+
+  // Read each touch phase once, then route its coordinates. wasScreenTapped()
+  // is consumptive; asking the cover and menu helpers separately made the
+  // cover swallow every menu tap whenever a recent book existed.
+  int tx = 0;
+  int ty = 0;
+  if (mappedInput.wasScreenTouchDown(tx, ty)) {
+    if (routeTouchPoint(tx, ty, false)) return;
+  }
+  if (mappedInput.wasScreenTapped(tx, ty)) {
+    if (routeTouchPoint(tx, ty, true)) return;
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {

@@ -18,6 +18,7 @@
 #include "activities/util/BmpViewerActivity.h"
 #include "activities/util/FullScreenMessageActivity.h"
 #include "components/UITheme.h"
+#include "fontIds.h"
 
 bool ReaderActivity::isXtcFile(const std::string& path) { return FsHelpers::hasXtcExtension(path); }
 
@@ -157,25 +158,48 @@ void ReaderActivity::onEnter() {
   } else if (isXtcFile(initialBookPath)) {
     auto xtc = loadXtc(initialBookPath);
     if (!xtc) {
-      onGoBack();
+      loadFailed = true;
+      requestUpdate();
       return;
     }
     onGoToXtcReader(std::move(xtc));
   } else if (isTxtFile(initialBookPath)) {
     auto txt = loadTxt(initialBookPath);
     if (!txt) {
-      onGoBack();
+      loadFailed = true;
+      requestUpdate();
       return;
     }
     onGoToTxtReader(std::move(txt));
   } else {
     auto epub = loadEpub(initialBookPath);
     if (!epub) {
-      onGoBack();
+      loadFailed = true;
+      requestUpdate();
       return;
     }
     onGoToEpubReader(std::move(epub));
   }
+}
+
+void ReaderActivity::loop() {
+  if (!loadFailed) return;
+
+  int x = 0;
+  int y = 0;
+  if (mappedInput.wasAnyReleased() || mappedInput.wasScreenTapped(x, y)) {
+    goToLibrary(initialBookPath);
+  }
+}
+
+void ReaderActivity::render(RenderLock&&) {
+  if (!loadFailed) return;
+
+  renderer.clearScreen();
+  const int lineHeight = renderer.getLineHeight(UI_12_FONT_ID);
+  renderer.drawCenteredText(UI_12_FONT_ID, (renderer.getScreenHeight() - lineHeight) / 2, tr(STR_PAGE_LOAD_ERROR),
+                            true, EpdFontFamily::BOLD);
+  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
 }
 
 void ReaderActivity::onGoBack() { finish(); }

@@ -21,7 +21,10 @@
 
 static portMUX_TYPE activityManagerSpinlock = portMUX_INITIALIZER_UNLOCKED;
 namespace {
-constexpr uint32_t DISPLAY_MAINTENANCE_QUIET_MS = 350;
+// The foreground B/W waveform itself is the cancellation window: any input
+// already queued while it runs invalidates the generation before maintenance.
+// Do not add a visible post-refresh delay before gray refinement or cleanup.
+constexpr uint32_t DISPLAY_MAINTENANCE_QUIET_MS = 0;
 }
 
 void ActivityManager::begin() {
@@ -95,19 +98,33 @@ void ActivityManager::renderTaskLoop() {
         continue;
       }
 
+      if (!renderer.hasPendingDisplayMaintenance()) {
+        if (renderStarted != 0) {
+          LOG_DBG("ACT", "Render complete: seq=%lu foreground=%lums maintenance=0ms",
+                  static_cast<unsigned long>(sequence), foregroundDone - renderStarted);
+        }
+        break;
+      }
+
+      // The render task is also the single controller-work consumer. Foreground
+      // updates always win above; while the controller is otherwise idle, drain
+      // exactly one low-priority maintenance waveform and then re-check both
+      // queues. No polling delay and no concurrent SPI owners are involved.
       const unsigned long maintenanceStarted = millis();
+      displayControllerWorkActive.store(true);
       {
         HalPowerManager::Lock powerLock;
         renderer.runDisplayMaintenance();
       }
+      displayControllerWorkActive.store(false);
       const unsigned long maintenanceMs = millis() - maintenanceStarted;
-      if (renderStarted != 0) {
-        LOG_DBG("ACT", "Render complete: seq=%lu foreground=%lums maintenance=%lums",
-                static_cast<unsigned long>(sequence), foregroundDone - renderStarted, maintenanceMs);
-      } else if (maintenanceMs > 0) {
-        LOG_DBG("ACT", "Deferred display maintenance: %lums", maintenanceMs);
-      }
-      break;
+      LOG_DBG("ACT", "Controller maintenance task: %lums pending=%u", maintenanceMs,
+              static_cast<unsigned>(renderer.hasPendingDisplayMaintenance()));
+
+      // Loop even when this was the final task: a touch/update may have raced
+      // its indivisible waveform, and the foreground queue must be checked
+      // before this controller worker sleeps again.
+      continue;
     }
   }
 }

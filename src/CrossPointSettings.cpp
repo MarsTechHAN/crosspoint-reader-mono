@@ -96,6 +96,7 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   // option lists depend on the SD font registry), so the generic loop skips them.
   doc["fontFamily"] = fontFamily;
   doc["fontSize"] = fontPointSize;
+  doc["readerTypographyVersion"] = 1;
   // SD card font family name — not in SettingsList, save manually
   if (sdFontFamilyName[0] != '\0') {
     doc["sdFontFamilyName"] = sdFontFamilyName;
@@ -204,6 +205,13 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   uint8_t storedFontSize = doc["fontSize"] | DEFAULT_FONT_POINT_SIZE;
   if (storedFontSize <= LEGACY_FONT_SIZE_MAX) {
     storedFontSize = 12 + storedFontSize * 2;  // 0,1,2,3 -> 12,14,16,18
+    needsResave = true;
+  }
+  // One-time Paper Mono typography migration. The old 14 pt default is too
+  // small at this panel's DPI, especially for CJK. Preserve deliberate custom
+  // sizes while moving an untouched default to 16 pt for every script.
+  if ((doc["readerTypographyVersion"] | (uint8_t)0) < 1 && storedFontSize == 14) {
+    storedFontSize = 16;
     needsResave = true;
   }
   fontPointSize = storedFontSize;

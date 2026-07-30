@@ -27,6 +27,7 @@
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#include "FlashTtfFont.h"
 #include "KOReaderCredentialStore.h"
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
@@ -55,7 +56,15 @@ ActivityManager activityManager(renderer, mappedInputManager);
 FontDecompressor fontDecompressor;
 SdCardFontSystem sdFontSystem;
 FontCacheManager fontCacheManager(renderer.getFontMap(), renderer.getSdCardFonts());
+#if FREEINK_DEVICE_PAPERMONO
+FlashTtfFont builtinCjkFont;
+#endif
 static unsigned long allowSleepAt = 0;
+#if FREEINK_DEVICE_PAPERMONO
+// RAM-only test override. It is set through CMD:STAYAWAKE and intentionally
+// disappears on reset so normal saved power settings are never changed.
+static unsigned long debugSleepTimeoutMs = 0;
+#endif
 
 // Fonts
 EpdFont notoserif14RegularFont(&notoserif_14_regular);
@@ -274,6 +283,28 @@ void setupDisplayAndFonts(bool seamless = false) {
   renderer.insertFont(UI_10_FONT_ID, ui10FontFamily);
   renderer.insertFont(UI_12_FONT_ID, ui12FontFamily);
   renderer.insertFont(SMALL_FONT_ID, smallFontFamily);
+
+#if FREEINK_DEVICE_PAPERMONO
+  if (builtinCjkFont.begin()) {
+    for (const uint8_t pointSize : FlashTtfFont::POINT_SIZES) {
+      renderer.insertFont(builtinCjkFontId(pointSize), EpdFontFamily(builtinCjkFont.font(pointSize)));
+    }
+
+    renderer.setBuiltinFallbackFont(SMALL_FONT_ID, BUILTIN_CJK_8_FONT_ID);
+    renderer.setBuiltinFallbackFont(UI_10_FONT_ID, BUILTIN_CJK_10_FONT_ID);
+    renderer.setBuiltinFallbackFont(UI_12_FONT_ID, BUILTIN_CJK_12_FONT_ID);
+#ifndef OMIT_FONTS
+    renderer.setBuiltinFallbackFont(NOTOSERIF_12_FONT_ID, BUILTIN_CJK_12_FONT_ID);
+    renderer.setBuiltinFallbackFont(NOTOSERIF_16_FONT_ID, BUILTIN_CJK_16_FONT_ID);
+    renderer.setBuiltinFallbackFont(NOTOSERIF_18_FONT_ID, BUILTIN_CJK_18_FONT_ID);
+    renderer.setBuiltinFallbackFont(NOTOSANS_12_FONT_ID, BUILTIN_CJK_12_FONT_ID);
+    renderer.setBuiltinFallbackFont(NOTOSANS_14_FONT_ID, BUILTIN_CJK_14_FONT_ID);
+    renderer.setBuiltinFallbackFont(NOTOSANS_16_FONT_ID, BUILTIN_CJK_16_FONT_ID);
+    renderer.setBuiltinFallbackFont(NOTOSANS_18_FONT_ID, BUILTIN_CJK_18_FONT_ID);
+#endif
+    renderer.setBuiltinFallbackFont(NOTOSERIF_14_FONT_ID, BUILTIN_CJK_14_FONT_ID);
+  }
+#endif
 
   // Discover and load SD card fonts
   sdFontSystem.begin(renderer);
@@ -570,6 +601,22 @@ void loop() {
         mappedInputManager.injectDebugTap(x, y);
         activityManager.noteUserInteraction();
         LOG_INF("INPUT", "Injected %s tap at logical (%d,%d)", cmd.c_str(), x, y);
+      } else if (cmd == "HOME") {
+        activityManager.noteUserInteraction();
+        activityManager.goHome();
+        LOG_INF("INPUT", "Injected HOME navigation");
+#if FREEINK_DEVICE_PAPERMONO
+      } else if (cmd == "SETTINGS") {
+        activityManager.noteUserInteraction();
+        activityManager.goToSettings();
+        LOG_INF("INPUT", "Injected SETTINGS navigation");
+#endif
+#if FREEINK_DEVICE_PAPERMONO
+      } else if (cmd == "STAYAWAKE") {
+        debugSleepTimeoutMs = 2UL * 60UL * 60UL * 1000UL;
+        activityManager.noteUserInteraction();
+        LOG_INF("SLP", "RAM-only auto-sleep timeout override: %lu ms", debugSleepTimeoutMs);
+#endif
       } else if (cmd == "BATTERY") {
         const BatteryMonitor::Status status = BatteryMonitor().readStatus();
         logSerial.printf("BATTERY supported=%d percent=%d:%u mv=%d:%u ext=%d:%d charging=%d:%d vin=%ld usb=%ld src=%d\n",
@@ -624,7 +671,11 @@ void loop() {
     screenshotComboActive = false;
   }
 
-  const unsigned long sleepTimeoutMs = SETTINGS.getSleepTimeoutMs();
+  const unsigned long sleepTimeoutMs =
+#if FREEINK_DEVICE_PAPERMONO
+      debugSleepTimeoutMs != 0 ? debugSleepTimeoutMs :
+#endif
+                                 SETTINGS.getSleepTimeoutMs();
   if (sleepTimeoutMs > 0 && millis() - lastActivityTime >= sleepTimeoutMs) {
     LOG_DBG("SLP", "Auto-sleep triggered after %lu ms of inactivity", sleepTimeoutMs);
     enterDeepSleep(true);

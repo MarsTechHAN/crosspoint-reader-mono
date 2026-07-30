@@ -68,6 +68,7 @@ class ActivityManager {
   std::atomic<unsigned long> lastUpdateRequestedMs{0};
   std::atomic<uint32_t> updateSequence{0};
   std::atomic<uint32_t> interactionSequence{0};
+  std::atomic<bool> displayControllerWorkActive{false};
   uint32_t waitingUpdateSequence = 0;
 
  public:
@@ -106,6 +107,7 @@ class ActivityManager {
 
   bool preventAutoSleep() const;
   bool isReaderActivity() const;
+  bool isDisplayControllerWorkActive() const { return displayControllerWorkActive.load(); }
   bool handleForcedRefresh();
   bool skipLoopDelay() const;
   ScreenshotInfo getScreenshotInfo() const;

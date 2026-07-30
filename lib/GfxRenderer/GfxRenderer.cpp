@@ -70,6 +70,9 @@ const uint8_t* GfxRenderer::getGlyphBitmap(const EpdFontData* fontData, const Ep
     // must consume it (draw the glyph) before requesting another bitmap.
     return fd->getBitmap(fontData, glyph, glyphIndex);
   }
+  if (fontData->glyphBitmapHandler) {
+    return fontData->glyphBitmapHandler(fontData->glyphMissCtx, glyph);
+  }
   // For SD card fonts, check if the glyph was loaded on demand into the overflow
   // buffer.  getOverflowBitmap() returns:
   //   - bitmap pointer for overflow glyphs with bitmap data
@@ -328,7 +331,34 @@ static void renderCharScaled(const GfxRenderer& renderer, GfxRenderer::RenderMod
   const int baseX = cursorX + glyph->left / 2;
   const int baseY = cursorY - glyph->top / 2;
 
-  if (fontData->is2Bit) {
+  if (fontData->glyphBitmapBpp == 8) {
+    for (int dstY = 0; dstY < dstH; dstY++) {
+      const int srcY = dstY * 2;
+      for (int dstX = 0; dstX < dstW; dstX++) {
+        const int srcX = dstX * 2;
+        uint16_t coverage = 0;
+        uint8_t samples = 0;
+        for (int sampleY = 0; sampleY < 2 && srcY + sampleY < srcH; sampleY++) {
+          for (int sampleX = 0; sampleX < 2 && srcX + sampleX < srcW; sampleX++) {
+            coverage += bitmap[(srcY + sampleY) * srcW + srcX + sampleX];
+            ++samples;
+          }
+        }
+        const uint8_t alpha = static_cast<uint8_t>((coverage + samples / 2) / samples);
+        const uint8_t raw = alpha < 32 ? 0 : alpha < 128 ? 1 : alpha < 224 ? 2 : 3;
+        if ((renderMode == GfxRenderer::BW && raw >= 2) ||
+            (renderMode == GfxRenderer::BW_GRAY_BASE && raw >= 2)) {
+          renderer.drawPixel(baseX + dstX, baseY + dstY, pixelState);
+        } else if (renderMode == GfxRenderer::GRAYSCALE_MSB && (raw == 1 || raw == 2)) {
+          renderer.drawPixel(baseX + dstX, baseY + dstY, false);
+          } else if (renderMode == GfxRenderer::GRAYSCALE_LSB && raw == 2) {
+            renderer.drawPixel(baseX + dstX, baseY + dstY, false);
+          } else if (renderMode == GfxRenderer::GRAYSCALE_BOTH && (raw == 1 || raw == 2)) {
+            renderer.drawGrayPixel(baseX + dstX, baseY + dstY, raw == 2, true);
+          }
+      }
+    }
+  } else if (fontData->is2Bit) {
     // 2-bit packed format: 4 pixels per byte, MSB first, 2 bits per pixel.
     // raw value: 0=white, 1=light-gray, 2=dark-gray, 3=black.
     for (int dstY = 0; dstY < dstH; dstY++) {
@@ -365,6 +395,8 @@ static void renderCharScaled(const GfxRenderer& renderer, GfxRenderer::RenderMod
         renderer.drawPixel(baseX + dstX, baseY + dstY, false);
       } else if (renderMode == GfxRenderer::GRAYSCALE_LSB && raw == 2) {
         renderer.drawPixel(baseX + dstX, baseY + dstY, false);
+      } else if (renderMode == GfxRenderer::GRAYSCALE_BOTH && (raw == 1 || raw == 2)) {
+        renderer.drawGrayPixel(baseX + dstX, baseY + dstY, raw == 2, true);
       }
       }
     }
@@ -405,6 +437,7 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
 
   const EpdFontData* fontData = fontFamily.getData(style);
   const bool is2Bit = fontData->is2Bit;
+  const bool is8Bit = fontData->glyphBitmapBpp == 8;
   const uint8_t width = glyph->width;
   const uint8_t height = glyph->height;
   const int left = glyph->left;
@@ -441,7 +474,35 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
       innerBase = cursorX + left;  // screenX = innerBase + glyphX
     }
 
-    if (is2Bit) {
+    if (is8Bit) {
+      int pixelPosition = 0;
+      for (int glyphY = 0; glyphY < height; glyphY++) {
+        const int outerCoord = outerBase + glyphY;
+        for (int glyphX = 0; glyphX < width; glyphX++, pixelPosition++) {
+          int screenX, screenY;
+          if constexpr (rotation == TextRotation::Rotated90CW) {
+            screenX = outerCoord;
+            screenY = innerBase - glyphX;
+          } else {
+            screenX = innerBase + glyphX;
+            screenY = outerCoord;
+          }
+
+          const uint8_t alpha = bitmap[pixelPosition];
+          const uint8_t raw = alpha < 32 ? 0 : alpha < 128 ? 1 : alpha < 224 ? 2 : 3;
+          if ((renderMode == GfxRenderer::BW && raw >= 2) ||
+              (renderMode == GfxRenderer::BW_GRAY_BASE && raw >= 2)) {
+            renderer.drawPixel(screenX, screenY, pixelState);
+          } else if (renderMode == GfxRenderer::GRAYSCALE_MSB && (raw == 1 || raw == 2)) {
+            renderer.drawPixel(screenX, screenY, false);
+          } else if (renderMode == GfxRenderer::GRAYSCALE_LSB && raw == 2) {
+            renderer.drawPixel(screenX, screenY, false);
+          } else if (renderMode == GfxRenderer::GRAYSCALE_BOTH && (raw == 1 || raw == 2)) {
+            renderer.drawGrayPixel(screenX, screenY, raw == 2, true);
+          }
+        }
+      }
+    } else if (is2Bit) {
       int pixelPosition = 0;
       for (int glyphY = 0; glyphY < height; glyphY++) {
         const int outerCoord = outerBase + glyphY;
@@ -474,6 +535,8 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
           } else if (renderMode == GfxRenderer::GRAYSCALE_LSB && bmpVal == 1) {
             // Dark gray
             renderer.drawPixel(screenX, screenY, false);
+          } else if (renderMode == GfxRenderer::GRAYSCALE_BOTH && (bmpVal == 1 || bmpVal == 2)) {
+            renderer.drawGrayPixel(screenX, screenY, bmpVal == 1, true);
           }
         }
       }
@@ -539,6 +602,20 @@ void GfxRenderer::drawPixel(const int x, const int y, const bool state) const {
   } else {
     target[byteIndex] |= 1 << bitPosition;  // Set bit
   }
+}
+
+void GfxRenderer::drawGrayPixel(const int x, const int y, const bool lsb, const bool msb) const {
+  if ((!lsb && !msb) || !_stripActive || !_stripBufSecondary) return;
+
+  int phyX = 0;
+  int phyY = 0;
+  rotateCoordinates(orientation, x, y, &phyX, &phyY, panelWidth, panelHeight);
+  if (phyX < 0 || phyX >= panelWidth || phyY < _stripY0 || phyY >= _stripY0 + _stripRows) return;
+
+  const uint32_t byteIndex = static_cast<uint32_t>(phyY - _stripY0) * panelWidthBytes + (phyX >> 3);
+  const uint8_t bitMask = static_cast<uint8_t>(1u << (7 - (phyX & 7)));
+  if (lsb) _stripBuf[byteIndex] |= bitMask;
+  if (msb) _stripBufSecondary[byteIndex] |= bitMask;
 }
 
 int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontFamily::Style style,
@@ -1511,6 +1588,9 @@ void GfxRenderer::clearScreen(const uint8_t color) const {
   if (_stripActive) {
     // Clear only the active band's scratch, not the shared framebuffer.
     memset(_stripBuf, color, static_cast<size_t>(panelWidthBytes) * _stripRows);
+    if (_stripBufSecondary) {
+      memset(_stripBufSecondary, color, static_cast<size_t>(panelWidthBytes) * _stripRows);
+    }
     return;
   }
   display.clearScreen(color);
@@ -1522,6 +1602,17 @@ void GfxRenderer::beginStripTarget(uint8_t* scratch, int stripY0, int stripRows)
   // the downstream uint16_t cast in writeGrayscalePlaneStrip.
   assert(scratch != nullptr && stripRows > 0 && stripY0 >= 0 && stripY0 <= static_cast<int>(panelHeight) - stripRows);
   _stripBuf = scratch;
+  _stripBufSecondary = nullptr;
+  _stripY0 = stripY0;
+  _stripRows = stripRows;
+  _stripActive = true;
+}
+
+void GfxRenderer::beginDualStripTarget(uint8_t* lsb, uint8_t* msb, int stripY0, int stripRows) const {
+  assert(lsb != nullptr && msb != nullptr && stripRows > 0 && stripY0 >= 0 &&
+         stripY0 <= static_cast<int>(panelHeight) - stripRows);
+  _stripBuf = lsb;
+  _stripBufSecondary = msb;
   _stripY0 = stripY0;
   _stripRows = stripRows;
   _stripActive = true;
@@ -1530,6 +1621,7 @@ void GfxRenderer::beginStripTarget(uint8_t* scratch, int stripY0, int stripRows)
 void GfxRenderer::endStripTarget() const {
   _stripActive = false;
   _stripBuf = nullptr;
+  _stripBufSecondary = nullptr;
   _stripY0 = 0;
   _stripRows = 0;
 }
@@ -1584,6 +1676,8 @@ void GfxRenderer::abortDisplayWork() const { display.abortPostRefresh(); }
 bool GfxRenderer::displayWorkAborted() const { return display.postRefreshAborted(); }
 
 void GfxRenderer::runDisplayMaintenance() const { display.runMaintenance(); }
+
+bool GfxRenderer::hasPendingDisplayMaintenance() const { return display.hasPendingMaintenance(); }
 
 size_t GfxRenderer::readFramebufferRegion(int x, int y, int w, int h, uint8_t* dst, size_t dstCapacity) const {
   if (dst == nullptr || w <= 0 || h <= 0) return 0;
@@ -2122,6 +2216,10 @@ void GfxRenderer::writeGrayscalePlaneStrip(bool lsbPlane, const uint8_t* scratch
   assert(yStart >= 0 && numRows > 0 && yStart <= static_cast<int>(panelHeight) - numRows);
   display.writeGrayscalePlaneStrip(lsbPlane, scratch, static_cast<uint16_t>(yStart), static_cast<uint16_t>(numRows));
 }
+
+bool GfxRenderer::supportsBusyGrayscaleStaging() const { return display.supportsBusyGrayscaleStaging(); }
+
+void GfxRenderer::prepareGrayscaleTarget() const { display.prepareGrayscaleTarget(); }
 
 bool GfxRenderer::supportsStripGrayscale() const { return display.supportsStripGrayscale(); }
 

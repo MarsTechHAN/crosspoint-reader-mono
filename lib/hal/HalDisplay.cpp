@@ -95,6 +95,8 @@ bool HalDisplay::postRefreshAborted() const { return einkDisplay.postRefreshAbor
 
 void HalDisplay::runMaintenance() { einkDisplay.runMaintenance(); }
 
+bool HalDisplay::hasPendingMaintenance() const { return einkDisplay.hasPendingMaintenance(); }
+
 void HalDisplay::refreshDisplay(HalDisplay::RefreshMode mode, bool turnOffScreen) {
   if (gpio.deviceIsX3() && mode == RefreshMode::HALF_REFRESH) {
     einkDisplay.requestResync(1);
@@ -152,6 +154,10 @@ void HalDisplay::writeGrayscalePlaneStrip(bool lsbPlane, const uint8_t* rows, ui
   einkDisplay.writeGrayscalePlaneStrip(lsbPlane ? EInkDisplay::GRAY_PLANE_LSB : EInkDisplay::GRAY_PLANE_MSB, rows,
                                        yStart, numRows);
 }
+
+bool HalDisplay::supportsBusyGrayscaleStaging() const { return einkDisplay.supportsBusyGrayscaleStaging(); }
+
+void HalDisplay::prepareGrayscaleTarget() { einkDisplay.prepareGrayscaleTarget(); }
 
 bool HalDisplay::supportsStripGrayscale() const { return einkDisplay.supportsStripGrayscale(); }
 

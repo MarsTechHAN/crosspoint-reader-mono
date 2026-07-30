@@ -213,4 +213,16 @@ typedef struct {
   /// answer from RAM-resident data without storage I/O.  Shares glyphMissCtx.
   /// nullptr for fonts whose interval table is already complete (built-ins).
   bool (*coverageHandler)(void* ctx, uint32_t codepoint);
+
+  /// Optional bitmap provider for dynamically rasterized fonts. The returned
+  /// bytes remain valid long enough for the renderer to consume this glyph.
+  /// Shares glyphMissCtx with the glyph/coverage callbacks.
+  const uint8_t* (*glyphBitmapHandler)(void* ctx, const EpdGlyph* glyph);
+
+  /// Bits per unpacked bitmap pixel returned by glyphBitmapHandler. Zero keeps
+  /// the legacy packed format selected by is2Bit; 8 is alpha coverage.
+  uint8_t glyphBitmapBpp;
+
+  /// Optional dynamic kerning provider. Returns signed 4.4 fixed-point pixels.
+  int8_t (*kerningHandler)(void* ctx, uint32_t leftCodepoint, uint32_t rightCodepoint);
 } EpdFontData;

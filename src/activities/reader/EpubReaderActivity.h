@@ -66,11 +66,11 @@ class EpubReaderActivity final : public Activity {
   int prefetchedSpine = -1;
   int prefetchedPageNumber = -1;
   // Paper Mono renders both grayscale selector planes while the panel's B/W
-  // waveform is BUSY. These 48 KB blocks route to OPI PSRAM (>4 KB allocator
-  // threshold) and are retained for the reader lifetime to avoid per-page heap
-  // churn and redundant zero-initialization.
-  std::unique_ptr<uint8_t[]> grayLsbPlaneBuffer;
-  std::unique_ptr<uint8_t[]> grayMsbPlaneBuffer;
+  // waveform is BUSY. Allocate these 48 KB blocks explicitly in PSRAM and
+  // retain them for the reader lifetime; relying on operator new's allocator
+  // routing made image pages fall back to repeated 80-row re-renders.
+  uint8_t* grayLsbPlaneBuffer = nullptr;
+  uint8_t* grayMsbPlaneBuffer = nullptr;
   size_t grayPlaneBufferBytes = 0;
   unsigned long lastRenderCompleteMs = 0;
   bool bookmarkRemoved = false;  // true when last toggle removed (controls popup text)
@@ -121,6 +121,7 @@ class EpubReaderActivity final : public Activity {
   // background build chunk never noticeably delays input or a pending render.
   static constexpr int BUILD_PAGES_PER_CHUNK = 8;
   static constexpr int BACKGROUND_BUILD_PAGES_PER_TICK = 2;
+  static constexpr unsigned long BACKGROUND_BUILD_BUDGET_MS = 25;
 
   // MEMFIX-PORT: background-build heap floor; portable
   // Skip background build ticks below this free-heap floor. The parse path grows
@@ -218,9 +219,7 @@ class EpubReaderActivity final : public Activity {
                                        &pageTurnQueueStorage);
     assert(pageTurnQueue != nullptr);
   }
-  ~EpubReaderActivity() override {
-    if (pageTurnQueue) vQueueDelete(pageTurnQueue);
-  }
+  ~EpubReaderActivity() override;
   void onEnter() override;
   void onExit() override;
   void loop() override;

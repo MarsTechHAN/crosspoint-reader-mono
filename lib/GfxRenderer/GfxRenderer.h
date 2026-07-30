@@ -34,7 +34,11 @@ class GfxRenderer {
     // base and avoids a visibly over-bold intermediate frame.
     BW_GRAY_BASE,
     GRAYSCALE_LSB,
-    GRAYSCALE_MSB
+    GRAYSCALE_MSB,
+    // Build both selector planes in one layout/render traversal. The primary
+    // strip target receives the dark-gray (LSB) selector and the secondary
+    // target receives the light+dark (MSB) selector.
+    GRAYSCALE_BOTH
   };
 
   // Logical screen orientation from the perspective of callers
@@ -79,6 +83,7 @@ class GfxRenderer {
   // the BW framebuffer (no storeBwBuffer). Mutable because the render path is
   // const. See beginStripTarget()/endStripTarget().
   mutable uint8_t* _stripBuf = nullptr;
+  mutable uint8_t* _stripBufSecondary = nullptr;
   mutable int _stripY0 = 0;
   mutable int _stripRows = 0;
   mutable bool _stripActive = false;
@@ -90,6 +95,7 @@ class GfxRenderer {
   // appears at the same point size as the surrounding UI text. Populated by the
   // app-level SD font setup when an SD family is loaded. See resolveTextFontId().
   std::map<int, int> fallbackFontMap_;
+  std::map<int, int> builtinFallbackFontMap_;
 
   // If `text` contains a CJK codepoint that `fontId` cannot render and `fontId`
   // has a registered fallback, returns the fallback id; otherwise returns
@@ -153,7 +159,11 @@ class GfxRenderer {
   // Register/clear size-matched CJK UI fallbacks (see fallbackFontMap_).
   // setFallbackFont maps a primary UI font id to an SD font id of the same size.
   void setFallbackFont(int primaryFontId, int fallbackFontId) { fallbackFontMap_[primaryFontId] = fallbackFontId; }
-  void clearFallbackFonts() { fallbackFontMap_.clear(); }
+  void setBuiltinFallbackFont(int primaryFontId, int fallbackFontId) {
+    builtinFallbackFontMap_[primaryFontId] = fallbackFontId;
+    fallbackFontMap_[primaryFontId] = fallbackFontId;
+  }
+  void clearFallbackFonts() { fallbackFontMap_ = builtinFallbackFontMap_; }
   // Ensure SD card font glyph data is loaded for the given text. Called from layout code
   // (which holds a const GfxRenderer&) before measuring word widths. Safe to call on non-SD fonts (no-op).
   // styleMask: bitmask of styles to prepare (bit 0=regular, 1=bold, 2=italic, 3=bold-italic).
@@ -189,6 +199,7 @@ class GfxRenderer {
   void abortDisplayWork() const;
   bool displayWorkAborted() const;
   void runDisplayMaintenance() const;
+  bool hasPendingDisplayMaintenance() const;
   // EXPERIMENTAL: Windowed update - display only a rectangular region
   // void displayWindow(int x, int y, int width, int height) const;
   void invertScreen() const;
@@ -202,6 +213,7 @@ class GfxRenderer {
   // after the orientation rotate, so it is orientation-agnostic. Used to render
   // grayscale planes band-by-band without a full second buffer.
   void beginStripTarget(uint8_t* scratch, int stripY0, int stripRows) const;
+  void beginDualStripTarget(uint8_t* lsb, uint8_t* msb, int stripY0, int stripRows) const;
   void endStripTarget() const;
 
   // Band culling for tiled grayscale. Takes a glyph bounding box in logical
@@ -217,11 +229,15 @@ class GfxRenderer {
   // framebuffer ([0, panelHeight)). Writers subtract the origin and clip to the
   // extent, so they honor tiled-grayscale banding without per-pixel method calls.
   uint8_t* getWriteTarget() const { return _stripActive ? _stripBuf : frameBuffer; }
+  uint8_t* getSecondaryWriteTarget() const { return _stripActive ? _stripBufSecondary : nullptr; }
   int getWriteOriginY() const { return _stripActive ? _stripY0 : 0; }
   int getWriteRows() const { return _stripActive ? _stripRows : panelHeight; }
 
   // Drawing
   void drawPixel(int x, int y, bool state = true) const;
+  // Mark a four-gray selector pixel in one or both active full-plane targets.
+  // Only valid between beginDualStripTarget() and endStripTarget().
+  void drawGrayPixel(int x, int y, bool lsb, bool msb) const;
   void drawLine(int x1, int y1, int x2, int y2, bool state = true) const;
   void drawLine(int x1, int y1, int x2, int y2, int lineWidth, bool state) const;
   void drawArc(int maxRadius, int cx, int cy, int xDir, int yDir, int lineWidth, bool state) const;
@@ -307,6 +323,8 @@ class GfxRenderer {
   // from `scratch` (panelWidthBytes * numRows, physical rows [yStart, yStart+
   // numRows)), bypassing the framebuffer. supportsStripGrayscale() gates use.
   void writeGrayscalePlaneStrip(bool lsbPlane, const uint8_t* scratch, int yStart, int numRows) const;
+  bool supportsBusyGrayscaleStaging() const;
+  void prepareGrayscaleTarget() const;
   bool supportsStripGrayscale() const;
   bool storeBwBuffer();    // Returns true if buffer was stored successfully
   void restoreBwBuffer();  // Restore and free the stored buffer

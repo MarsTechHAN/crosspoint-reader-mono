@@ -16,6 +16,7 @@
 // and the JPEG/PNG callbacks pre-clamp destination ranges to screen bounds.
 struct DirectPixelWriter {
   uint8_t* fb;
+  uint8_t* fbSecondary;
   GfxRenderer::RenderMode mode;
   uint16_t displayWidthBytes;  // Runtime framebuffer stride (X4: 100, X3: 99)
   // Active write target: for tiled grayscale, fb is the band scratch, originY is
@@ -37,6 +38,7 @@ struct DirectPixelWriter {
 
   void init(GfxRenderer& renderer) {
     fb = renderer.getWriteTarget();
+    fbSecondary = renderer.getSecondaryWriteTarget();
     originY = renderer.getWriteOriginY();
     clipRows = renderer.getWriteRows();
     mode = renderer.getRenderMode();
@@ -145,6 +147,7 @@ struct DirectPixelWriter {
   // Must be called after beginRow() for the current row.
   // No bounds checking — caller guarantees coordinates are valid.
   inline void writePixel(int logicalX, uint8_t pixelValue) const {
+    const bool dual = mode == GfxRenderer::GRAYSCALE_BOTH;
     // Determine whether to draw based on render mode
     bool draw;
     bool state;
@@ -165,6 +168,10 @@ struct DirectPixelWriter {
         draw = (pixelValue == 1);
         state = false;
         break;
+      case GfxRenderer::GRAYSCALE_BOTH:
+        draw = (pixelValue == 1 || pixelValue == 2);
+        state = false;
+        break;
       default:
         return;
     }
@@ -181,6 +188,13 @@ struct DirectPixelWriter {
 
     const uint16_t byteIndex = static_cast<uint16_t>(sy * displayWidthBytes + (phyX >> 3));
     const uint8_t bitMask = 1 << (7 - (phyX & 7));
+
+    if (dual) {
+      assert(fbSecondary != nullptr);
+      if (pixelValue == 1) fb[byteIndex] |= bitMask;
+      fbSecondary[byteIndex] |= bitMask;
+      return;
+    }
 
     if (state) {
       fb[byteIndex] &= ~bitMask;  // Clear bit (draw black)

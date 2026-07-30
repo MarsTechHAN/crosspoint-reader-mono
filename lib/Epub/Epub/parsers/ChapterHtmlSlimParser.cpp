@@ -22,7 +22,10 @@
 
 // Minimum file size (in bytes) to show indexing popup - smaller chapters don't benefit from it
 constexpr size_t MIN_SIZE_FOR_POPUP = 10 * 1024;  // 10KB
-constexpr size_t PARSE_BUFFER_SIZE = 1024;
+// Incremental background parsing can only yield between Expat buffers. Keep
+// this small enough that CJK layout cannot monopolize the input loop for the
+// hundreds of milliseconds observed with the former 1 KB chunk.
+constexpr size_t PARSE_BUFFER_SIZE = 256;
 
 // This number comes from PR #73
 // If we have > 750 words buffered up, perform the layout and consume out all but the last line

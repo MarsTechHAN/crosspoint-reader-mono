@@ -57,6 +57,7 @@ class HalDisplay {
   void abortPostRefresh();
   bool postRefreshAborted() const;
   void runMaintenance();
+  bool hasPendingMaintenance() const;
   void refreshDisplay(RefreshMode mode = RefreshMode::FAST_REFRESH, bool turnOffScreen = false);
 
   // Power management
@@ -98,6 +99,8 @@ class HalDisplay {
   // straight to the controller; supportsStripGrayscale() gates the path. See
   // EInkDisplay::writeGrayscalePlaneStrip.
   void writeGrayscalePlaneStrip(bool lsbPlane, const uint8_t* rows, uint16_t yStart, uint16_t numRows);
+  bool supportsBusyGrayscaleStaging() const;
+  void prepareGrayscaleTarget();
   bool supportsStripGrayscale() const;
 
   // Runtime geometry passthrough

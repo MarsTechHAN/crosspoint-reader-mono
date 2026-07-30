@@ -8,10 +8,33 @@
 #include <Utf8.h>
 #include <ZipFile.h>
 
+#include <cctype>
+
 #include "Epub/parsers/ContainerParser.h"
 #include "Epub/parsers/ContentOpfParser.h"
 #include "Epub/parsers/TocNavParser.h"
 #include "Epub/parsers/TocNcxParser.h"
+
+namespace {
+std::string canonicalZipPath(std::string path) {
+  path = FsHelpers::decodeUriEscapes(path);
+  std::replace(path.begin(), path.end(), '\\', '/');
+  path = FsHelpers::normalisePath(path);
+  std::transform(path.begin(), path.end(), path.begin(),
+                 [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return path;
+}
+
+bool hasOpfExtension(const std::string_view path) {
+  constexpr std::string_view extension = ".opf";
+  if (path.size() < extension.size()) return false;
+  const auto suffix = path.substr(path.size() - extension.size());
+  for (size_t i = 0; i < extension.size(); ++i) {
+    if (std::tolower(static_cast<unsigned char>(suffix[i])) != extension[i]) return false;
+  }
+  return true;
+}
+}  // namespace
 
 bool Epub::findContentOpfFile(std::string* contentOpfFile) const {
   const auto containerPath = "META-INF/container.xml";
@@ -41,7 +64,56 @@ bool Epub::findContentOpfFile(std::string* contentOpfFile) const {
     return false;
   }
 
-  *contentOpfFile = std::move(containerParser.fullPath);
+  std::string declaredPath = std::move(containerParser.fullPath);
+  size_t declaredSize = 0;
+  if (getItemSize(declaredPath, &declaredSize)) {
+    *contentOpfFile = std::move(declaredPath);
+    return true;
+  }
+
+  // Some EPUB generators write a container path whose spelling differs from
+  // the ZIP central directory (case, URI escapes, leading slash or Windows
+  // separators). Resolve that declaration to the actual entry. If the archive
+  // contains exactly one OPF, it is also an unambiguous recovery for a stale or
+  // otherwise malformed container.xml.
+  const std::string canonicalDeclared = canonicalZipPath(declaredPath);
+  std::string equivalentPath;
+  std::string onlyOpfPath;
+  size_t opfCount = 0;
+  const bool enumerated = ZipFile(filepath).enumerateFilePaths([&](const std::string_view entryPath) {
+    const std::string candidate{entryPath};
+    if (equivalentPath.empty() && canonicalZipPath(candidate) == canonicalDeclared) {
+      equivalentPath = candidate;
+    }
+    if (hasOpfExtension(entryPath)) {
+      ++opfCount;
+      if (opfCount == 1) onlyOpfPath = candidate;
+    }
+  });
+
+  if (!enumerated) {
+    LOG_ERR("EBP", "Could not enumerate ZIP while resolving declared OPF: %s", declaredPath.c_str());
+    return false;
+  }
+
+  std::string resolvedPath;
+  if (!equivalentPath.empty()) {
+    resolvedPath = std::move(equivalentPath);
+  } else if (opfCount == 1) {
+    resolvedPath = std::move(onlyOpfPath);
+  } else {
+    LOG_ERR("EBP", "Declared OPF not found: %s (archive OPF entries: %zu)", declaredPath.c_str(), opfCount);
+    return false;
+  }
+
+  size_t resolvedSize = 0;
+  if (!getItemSize(resolvedPath, &resolvedSize)) {
+    LOG_ERR("EBP", "Resolved OPF could not be sized: %s -> %s", declaredPath.c_str(), resolvedPath.c_str());
+    return false;
+  }
+
+  LOG_INF("EBP", "Resolved declared OPF path: %s -> %s", declaredPath.c_str(), resolvedPath.c_str());
+  *contentOpfFile = std::move(resolvedPath);
   return true;
 }
 

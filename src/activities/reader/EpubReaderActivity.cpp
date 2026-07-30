@@ -9,6 +9,7 @@
 #include <I18n.h>
 #include <Logging.h>
 #include <Memory.h>
+#include <esp_heap_caps.h>
 #include <esp_system.h>
 
 #include <algorithm>
@@ -148,6 +149,12 @@ void moveFinishedBookToReadFolder(const std::string& srcPath, const std::string&
 }
 
 }  // namespace
+
+EpubReaderActivity::~EpubReaderActivity() {
+  if (pageTurnQueue) vQueueDelete(pageTurnQueue);
+  heap_caps_free(grayLsbPlaneBuffer);
+  heap_caps_free(grayMsbPlaneBuffer);
+}
 
 void EpubReaderActivity::onEnter() {
   Activity::onEnter();
@@ -321,22 +328,34 @@ void EpubReaderActivity::loop() {
     return;
   }
 
+  // Input and controller work always outrank speculative parsing/prewarming.
+  // The input predicates are non-consuming edge snapshots; the handlers below
+  // still receive the same events. Pending covers the handoff before the
+  // controller worker starts, active covers its plane-transfer/waveform phase.
+  const bool foregroundInputPending =
+      mappedInput.wasAnyPressed() || mappedInput.wasAnyReleased() || gpio.wasTouchActivity();
+  const auto backgroundWorkAllowed = [&] {
+    return !foregroundInputPending && !renderer.hasPendingDisplayMaintenance() &&
+           !activityManager.isDisplayControllerWorkActive();
+  };
+
   // Idle glyph prewarm for the likely next page (currentPage + 1). The scan
   // pass draws nothing (FCM scan mode suppresses pixels), so the displayed
   // framebuffer is untouched; endScanAndPrewarm loads only glyphs not already
-  // cached. Debounced past rapid page-flipping, one attempt per position, and
-  // deferred while a render/build owns the CPU or the heap is at the render
-  // floor. Cross-chapter prewarm is deliberately out of scope (next spine's
+  // cached. Start immediately after the current render releases its lock; a
+  // pending page turn wins RenderLock::peek() and skips this work. One attempt
+  // is made per position, subject only to render/build ownership and heap
+  // floors. Cross-chapter prewarm is deliberately out of scope (next spine's
   // section isn't loaded).
-  constexpr unsigned long IDLE_PREWARM_DEBOUNCE_MS = 400;
-  if (section && !section->isBuilding() && !RenderLock::peek() && renderer.hasFrameBuffer() &&
-      lastRenderCompleteMs != 0 && millis() - lastRenderCompleteMs > IDLE_PREWARM_DEBOUNCE_MS &&
+  if (backgroundWorkAllowed() && section && !section->isBuilding() && !RenderLock::peek() &&
+      renderer.hasFrameBuffer() &&
+      lastRenderCompleteMs != 0 &&
       ESP.getFreeHeap() > RENDER_MIN_FREE_HEAP && ESP.getMaxAllocHeap() > BACKGROUND_BUILD_MIN_MAX_ALLOC &&
       (idlePrewarmSpine != currentSpineIndex || idlePrewarmPage != section->currentPage)) {
     RenderLock lock;  // the page table must not change under the scan
     // Re-check under the lock: peek() and acquisition are not atomic, so the render
     // task may have reset/replaced the section or moved the page in between.
-    if (section && !section->isBuilding() &&
+    if (backgroundWorkAllowed() && section && !section->isBuilding() &&
         (idlePrewarmSpine != currentSpineIndex || idlePrewarmPage != section->currentPage)) {
       idlePrewarmSpine = currentSpineIndex;
       idlePrewarmPage = section->currentPage;
@@ -372,8 +391,8 @@ void EpubReaderActivity::loop() {
   // render()); crossing this margin is the signal that the reader will actually need pages
   // past the watermark soon. Uses the last render's viewport so pagination matches the
   // partial being extended.
-  if (section && !section->isBuilding() && section->isPartial() && !RenderLock::peek() && buildViewportWidth > 0 &&
-      !partialRebuildStartFailed &&
+  if (backgroundWorkAllowed() && section && !section->isBuilding() && section->isPartial() && !RenderLock::peek() &&
+      buildViewportWidth > 0 && !partialRebuildStartFailed &&
       section->currentPage + PARTIAL_REBUILD_START_MARGIN >= static_cast<int>(section->pageCount)) {
     RenderLock lock;
     // Reuse the last render's viewport so the extension paginates identically to the partial.
@@ -399,7 +418,7 @@ void EpubReaderActivity::loop() {
   // partial's watermark until the build catches up, so the window check would wrongly read
   // "far enough ahead" and stall the build at 0 pages -- then the first turn past the
   // watermark re-parses the whole chapter synchronously. Keep ticking until it finalizes.
-  if (section && section->isBuilding() && !RenderLock::peek() &&
+  if (backgroundWorkAllowed() && section && section->isBuilding() && !RenderLock::peek() &&
       (section->isPartial() || static_cast<int>(section->pageCount) < section->currentPage + BUILD_WINDOW_AHEAD) &&
       buildTickHeapGate()) {
     RenderLock lock;
@@ -410,8 +429,8 @@ void EpubReaderActivity::loop() {
     // pre-lock heap reading. cppcheck can't see the cross-task mutation, so it flags this as
     // always true.
     // cppcheck-suppress knownConditionTrueFalse
-    if (section->isBuilding() && buildTickHeapGate()) {
-      if (!section->buildSomeMore(BACKGROUND_BUILD_PAGES_PER_TICK)) {
+    if (backgroundWorkAllowed() && section->isBuilding() && buildTickHeapGate()) {
+      if (!section->buildSomeMore(BACKGROUND_BUILD_PAGES_PER_TICK, BACKGROUND_BUILD_BUDGET_MS)) {
         LOG_ERR("ERS", "Background section build failed");
         section.reset();
         requestUpdate();
@@ -1542,18 +1561,15 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   }
 
   const bool pageHasImages = page->hasImages();
-  const bool pageHasImagesNeedingDecode = pageHasImages && page->hasImagesNeedingDecode();
   const bool manualRefreshPending = forcedRefreshPending;
   forcedRefreshPending = false;
   const bool needsTextGrayscale = SETTINGS.textAntiAliasing;
   const bool needsAnyGrayscale = needsTextGrayscale || pageHasImages;
   const bool tiledGrayscale = needsAnyGrayscale && renderer.supportsStripGrayscale();
-  // Whole-plane buffering only pays when the BW refresh genuinely runs async
-  // underneath it; on blocking panels (X3) it would just spend ~50 KB for the
-  // identical serial timing. Image pages take the blocking double-FAST path
-  // below (no async refresh is ever started), so they'd spend the buffers with
-  // nothing in flight to overlap.
-  const bool overlapRefresh = tiledGrayscale && renderer.supportsAsyncRefresh() && !pageHasImages;
+  // Keep the panel busy while both selector planes are composed. This applies
+  // to image pages too: their decoded pixel cache can now feed full PSRAM
+  // planes in one pass instead of forcing a blocking double-refresh pipeline.
+  const bool overlapRefresh = tiledGrayscale && renderer.supportsAsyncRefresh();
   auto renderGrayscalePass = [&]() {
     if (needsTextGrayscale) {
       page->render(renderer, fontId, orientedMarginLeft, orientedMarginTop);
@@ -1561,14 +1577,6 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
       page->renderImages(renderer, fontId, orientedMarginLeft, orientedMarginTop);
     }
   };
-
-  if (pageHasImagesNeedingDecode) {
-    page->renderWithImagePlaceholders(renderer, fontId, orientedMarginLeft, orientedMarginTop);
-    renderStatusBar();
-    if (renderer.displayWorkAborted()) return;
-    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
-    renderer.clearScreen();
-  }
 
   renderer.setRenderMode(needsAnyGrayscale ? GfxRenderer::BW_GRAY_BASE : GfxRenderer::BW);
   page->render(renderer, fontId, orientedMarginLeft, orientedMarginTop);
@@ -1580,43 +1588,12 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     return;
   }
 
-  if (pageHasImages) {
-    // Double FAST_REFRESH with selective image blanking (pablohc's technique):
-    // HALF_REFRESH sets particles too firmly for the grayscale LUT to adjust.
-    // Instead, blank only the image area and do two fast refreshes.
-    // Step 1: Display page with image area blanked (text appears, image area white)
-    // Step 2: Re-render with images and display again (images appear clean)
-    int16_t imgX, imgY, imgW, imgH;
-    if (page->getImageBoundingBox(imgX, imgY, imgW, imgH)) {
-      // Image pages intentionally bypass the regular refresh cadence. Preserve
-      // the manual clean pass before their double-FAST grayscale pipeline.
-      if (manualRefreshPending) {
-        renderer.displayBuffer(HalDisplay::HALF_REFRESH);
-      }
-      renderer.fillRect(imgX + orientedMarginLeft, imgY + orientedMarginTop, imgW, imgH, false);
-      renderer.displayBuffer(HalDisplay::FAST_REFRESH);
-
-      // Re-render page content to restore images into the blanked area
-      // Status bar is not re-rendered here to avoid reading stale dynamic values (e.g. battery %)
-      renderer.setRenderMode(GfxRenderer::BW_GRAY_BASE);
-      page->render(renderer, fontId, orientedMarginLeft, orientedMarginTop);
-      renderer.setRenderMode(GfxRenderer::BW);
-      renderer.displayBuffer(HalDisplay::FAST_REFRESH);
-    } else {
-      renderer.displayBuffer(HalDisplay::HALF_REFRESH);
-    }
-    // The image's own page is handled above and doesn't count toward the full
-    // refresh cadence. But the grayscale pass below leaves gray charge in the
-    // image region that a plain fast diff on the *next* page can't clear, so
-    // text there ghosts gray (#2190). Force the next ordinary page onto the
-    // HALF ghost-cleanup path, which drives every pixel to its target
-    // regardless of residue.
-    pagesUntilFullRefresh = 1;
-  } else {
-    // Async form: start the waveform and return so the grayscale plane rendering
-    // below overlaps the panel's refresh time instead of following it.
-    ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh, overlapRefresh);
-  }
+  // Decode and compose the complete target before touching the panel, then
+  // submit it once. The old image path visibly showed a placeholder/blank and
+  // issued two or three FAST waveforms before gray refinement. A manual refresh
+  // request still forces the normal cadence onto its full-clean mode.
+  if (manualRefreshPending) pagesUntilFullRefresh = 1;
+  ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh, overlapRefresh);
   lastPageDisplayCommitted = true;
   const auto tDisplay = millis();
 
@@ -1660,47 +1637,62 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
       return !renderer.displayWorkAborted();
     };
 
-    // Tiered on heap pressure: two plane buffers hide both plane renders
-    // inside the refresh wait; one hides the LSB render (its buffer is reused
-    // for MSB after streaming); none falls back to the strip-scratch flow with
-    // no overlap. Each buffer is only attempted when it leaves ~60 KB free so
-    // the pass never starves concurrent allocations: the next page re-render
-    // allocates through throwing std::string paths that abort() on OOM under
-    // -fno-exceptions, so a plane buffer that "fits" but eats the render
-    // headroom is worse than the strip fallback. Blocking panels skip the
-    // buffers entirely (nothing to overlap).
-    constexpr size_t PLANE_BUF_HEADROOM = 60000;
-    // Free-heap alone ignores fragmentation: taking the largest block for a
-    // plane can leave only slivers behind even when total headroom looks fine.
-    // Require the block to fit the plane with 16 KB contiguous to spare, which
-    // also keeps the advance-table batch scratch viable mid-render (same
-    // rationale as BACKGROUND_BUILD_MIN_MAX_ALLOC).
-    constexpr size_t PLANE_BUF_MAX_ALLOC_RESERVE = 16 * 1024;
-    const auto planeBufFits = [planeBytes] {
-      return ESP.getFreeHeap() >= planeBytes + PLANE_BUF_HEADROOM &&
-             ESP.getMaxAllocHeap() >= planeBytes + PLANE_BUF_MAX_ALLOC_RESERVE;
-    };
+    // Retained PSRAM planes avoid fragmenting the internal heap and are also
+    // available on image pages. Two buffers enable GRAYSCALE_BOTH: layout,
+    // glyph lookup and image traversal run once while populating both selector
+    // planes.
     if (grayPlaneBufferBytes != 0 && grayPlaneBufferBytes != planeBytes) {
-      grayLsbPlaneBuffer.reset();
-      grayMsbPlaneBuffer.reset();
+      heap_caps_free(grayLsbPlaneBuffer);
+      heap_caps_free(grayMsbPlaneBuffer);
+      grayLsbPlaneBuffer = nullptr;
+      grayMsbPlaneBuffer = nullptr;
       grayPlaneBufferBytes = 0;
     }
-    if (!grayLsbPlaneBuffer && overlapRefresh && planeBufFits()) {
-      grayLsbPlaneBuffer = makeUniqueNoThrow<uint8_t[]>(planeBytes);
+    const auto allocatePlane = [planeBytes] {
+      return static_cast<uint8_t*>(heap_caps_malloc(planeBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    };
+    if (!grayLsbPlaneBuffer && tiledGrayscale) {
+      grayLsbPlaneBuffer = allocatePlane();
       if (grayLsbPlaneBuffer) grayPlaneBufferBytes = planeBytes;
     }
-    if (!grayMsbPlaneBuffer && grayLsbPlaneBuffer && planeBufFits()) {
-      grayMsbPlaneBuffer = makeUniqueNoThrow<uint8_t[]>(planeBytes);
+    if (!grayMsbPlaneBuffer && grayLsbPlaneBuffer) {
+      grayMsbPlaneBuffer = allocatePlane();
     }
-    uint8_t* const lsbPlaneBuf = grayLsbPlaneBuffer.get();
-    uint8_t* const msbPlaneBuf = grayMsbPlaneBuffer.get();
+    uint8_t* const lsbPlaneBuf = grayLsbPlaneBuffer;
+    uint8_t* const msbPlaneBuf = grayMsbPlaneBuffer;
 
     if (lsbPlaneBuf) {
-      if (!renderPlaneToBuffer(true, lsbPlaneBuf) || (msbPlaneBuf && !renderPlaneToBuffer(false, msbPlaneBuf))) {
+      bool planesReady = false;
+      if (msbPlaneBuf) {
+        renderer.setRenderMode(GfxRenderer::GRAYSCALE_BOTH);
+        renderer.beginDualStripTarget(lsbPlaneBuf, msbPlaneBuf, 0, gh);
+        renderer.clearScreen(0x00);
+        renderGrayscalePass();
+        renderer.endStripTarget();
+        planesReady = !renderer.displayWorkAborted();
+      } else {
+        planesReady = renderPlaneToBuffer(true, lsbPlaneBuf);
+      }
+      if (!planesReady) {
         finishCancelledGray();
         return;
       }
       const auto tGrayRender = millis();
+
+      // Stage the current page before spending the remaining BUSY window on
+      // speculative work. This is CPU/RAM-only on SSD1683 and removes it from
+      // the visible B/W-to-gray gap.
+      const bool stageGrayWhileBusy = renderer.supportsBusyGrayscaleStaging();
+      if (stageGrayWhileBusy) {
+        renderer.writeGrayscalePlaneStrip(true, lsbPlaneBuf, 0, gh);
+        if (msbPlaneBuf) {
+          renderer.writeGrayscalePlaneStrip(false, msbPlaneBuf, 0, gh);
+        } else if (renderPlaneToBuffer(false, lsbPlaneBuf)) {
+          renderer.writeGrayscalePlaneStrip(false, lsbPlaneBuf, 0, gh);
+        }
+        renderer.prepareGrayscaleTarget();
+      }
+      const auto tGrayStage = millis();
 
       // EDCBook starts preparing its adjacent page while the panel is BUSY.
       // Do the same here, but retain only the deserialized Page and leave glyph
@@ -1735,15 +1727,17 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
       }
       const auto tWait = millis();
 
-      renderer.writeGrayscalePlaneStrip(true, lsbPlaneBuf, 0, gh);
-      if (msbPlaneBuf) {
-        renderer.writeGrayscalePlaneStrip(false, msbPlaneBuf, 0, gh);
-      } else {
-        if (!renderPlaneToBuffer(false, lsbPlaneBuf)) {
-          finishCancelledGray();
-          return;
+      if (!stageGrayWhileBusy) {
+        renderer.writeGrayscalePlaneStrip(true, lsbPlaneBuf, 0, gh);
+        if (msbPlaneBuf) {
+          renderer.writeGrayscalePlaneStrip(false, msbPlaneBuf, 0, gh);
+        } else {
+          if (!renderPlaneToBuffer(false, lsbPlaneBuf)) {
+            finishCancelledGray();
+            return;
+          }
+          renderer.writeGrayscalePlaneStrip(false, lsbPlaneBuf, 0, gh);
         }
-        renderer.writeGrayscalePlaneStrip(false, lsbPlaneBuf, 0, gh);
       }
       const auto tGrayWrite = millis();
 
@@ -1758,11 +1752,13 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
 
       LOG_DBG("ERS",
               "Page render (tiled async): prewarm=%lums bw_render=%lums display=%lums gray_render=%lums "
-              "prefetch=%lums wait=%lums gray_write=%lums gray_display=%lums cleanup=%lums total=%lums "
-              "(planes buffered: %d)",
+              "gray_stage=%lums prefetch=%lums wait=%lums gray_write=%lums gray_display=%lums cleanup=%lums "
+              "total=%lums "
+              "(planes buffered: %d, traversals: %d)",
               tPrewarm - t0, tBwRender - tPrewarm, tDisplay - tBwRender, tGrayRender - tDisplay,
-              tOverlapPrefetch - tGrayRender, tWait - tOverlapPrefetch, tGrayWrite - tWait,
-              tGrayDisplay - tGrayWrite, tEnd - tGrayDisplay, tEnd - t0, msbPlaneBuf ? 2 : 1);
+              tGrayStage - tGrayRender, tOverlapPrefetch - tGrayStage, tWait - tOverlapPrefetch, tGrayWrite - tWait,
+              tGrayDisplay - tGrayWrite, tEnd - tGrayDisplay, tEnd - t0, msbPlaneBuf ? 2 : 1,
+              msbPlaneBuf ? 1 : 2);
     } else {
       // Per-strip scratch tier: blocking panels (X3) and the OOM fallback.
       // The strip writes below need the panel idle, so wait out any pending

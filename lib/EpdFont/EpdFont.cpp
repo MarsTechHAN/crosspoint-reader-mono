@@ -105,6 +105,9 @@ int8_t EpdFont::getKerning(const uint32_t leftCp, const uint32_t rightCp) const 
   if (utf8IsCjkBreakable(leftCp) || utf8IsCjkBreakable(rightCp)) {
     return 0;
   }
+  if (data->kerningHandler) {
+    return data->kerningHandler(data->glyphMissCtx, leftCp, rightCp);
+  }
   if (!data->kernMatrix) {
     return 0;
   }

@@ -491,11 +491,12 @@ fui::Rect KeyboardEntryActivity::keyboardRect() const {
 }
 
 void KeyboardEntryActivity::loop() {
-  int tx = 0;
-  int ty = 0;
+  int tapX = 0;
+  int tapY = 0;
+  const bool tapped = mappedInput.wasScreenTapped(tapX, tapY);
 
   size_t touchedCursorPos = 0;
-  if (mappedInput.wasScreenTapped(tx, ty) && cursorPositionFromPoint(tx, ty, touchedCursorPos)) {
+  if (tapped && cursorPositionFromPoint(tapX, tapY, touchedCursorPos)) {
     cursorPos = std::min(touchedCursorPos, text.length());
     // The masked text field maps taps per byte; snap back to a boundary so
     // the cursor never lands inside a multi-byte character.
@@ -511,10 +512,9 @@ void KeyboardEntryActivity::loop() {
   }
 
   if (!cursorMode && interactionsReady) {
+    int tx = 0;
+    int ty = 0;
     const bool pressedDown = mappedInput.wasScreenTouchDown(tx, ty);
-    int tapX = 0;
-    int tapY = 0;
-    const bool tapped = mappedInput.wasScreenTapped(tapX, tapY);
     int hx = 0;
     int hy = 0;
     const bool inContact = mappedInput.isScreenTouchHeld(hx, hy);
