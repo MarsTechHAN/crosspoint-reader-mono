@@ -51,7 +51,16 @@ class FontCacheManager {
 
   enum class ScanMode : uint8_t { None, Scanning };
   ScanMode scanMode_ = ScanMode::None;
-  std::string scanText_;
-  uint32_t scanStyleCounts_[4] = {};
-  int scanFontId_ = -1;
+  // A page can contain the reader font, title/UI fonts and CJK fallbacks at
+  // once.  Keep their scan text separate so each backing cache is prewarmed
+  // with only the glyphs and styles it will actually render.
+  static constexpr uint8_t MAX_SCAN_FONTS = 8;
+  struct ScanBucket {
+    std::string text;
+    uint32_t styleCounts[4] = {};
+    int fontId = -1;
+  };
+  ScanBucket scanBuckets_[MAX_SCAN_FONTS];
+  uint8_t scanBucketCount_ = 0;
+  bool scanBucketOverflowLogged_ = false;
 };

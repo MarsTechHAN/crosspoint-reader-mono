@@ -42,25 +42,16 @@ inline uint16_t readU16(const uint8_t* p) { return p[0] | (p[1] << 8); }
 inline int16_t readI16(const uint8_t* p) { return static_cast<int16_t>(p[0] | (p[1] << 8)); }
 inline uint32_t readU32(const uint8_t* p) { return p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24); }
 
-// Walks a null-terminated UTF-8 string and appends each unique codepoint to
-// codepoints[0..cpCount-1] via O(n²) dedup.  Returns true if the buffer
-// reached maxCount (cap hit), false if all codepoints fit.
-bool collectUniqueCodepoints(const char* text, uint32_t* codepoints, uint32_t& cpCount, uint32_t maxCount) {
+// Walks a null-terminated UTF-8 string and appends raw codepoints.  Callers
+// sort+unique the complete batch once; doing a linear duplicate scan for each
+// input character made CJK paragraph layout O(n²).
+bool collectCodepoints(const char* text, uint32_t* codepoints, uint32_t& cpCount, uint32_t maxCount) {
   const unsigned char* p = reinterpret_cast<const unsigned char*>(text);
   while (*p) {
     uint32_t cp = utf8NextCodepoint(&p);
     if (cp == 0) break;
-    bool found = false;
-    for (uint32_t i = 0; i < cpCount; i++) {
-      if (codepoints[i] == cp) {
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
-      if (cpCount >= maxCount) return true;
-      codepoints[cpCount++] = cp;
-    }
+    if (cpCount >= maxCount) return true;
+    codepoints[cpCount++] = cp;
   }
   return false;
 }
@@ -747,48 +738,44 @@ int SdCardFont::prewarm(const char* utf8Text, uint8_t styleMask, bool metadataOn
 
   unsigned long startMs = millis();
 
-  // Step 1: Extract unique codepoints from UTF-8 text (shared across all styles).
-  // Dedup uses O(n^2) linear scan — worst case is MAX_PAGE_GLYPHS (512) unique codepoints
-  // = ~131K comparisons, but in practice pages contain far fewer unique codepoints so the
-  // actual cost is much lower. This is dwarfed by SD I/O that follows. Alternatives (hash
-  // set, bitmap) exceed the 256-byte stack limit or add template bloat.
-  // Heap-allocated: MAX_PAGE_GLYPHS * 4 = 2048 bytes, too large for stack (limit < 256 bytes)
-  std::unique_ptr<uint32_t[]> codepoints(new (std::nothrow) uint32_t[MAX_PAGE_GLYPHS]);
+  // Step 1: collect the page's codepoints, then sort+unique once.  The old
+  // per-codepoint linear dedupe was O(n^2), which becomes visible on Chinese
+  // pages.  Reserve one slot for U+FFFD and enough additional slots for every
+  // possible ligature output in the requested styles.
+  uint32_t inputCount = 0;
+  for (const unsigned char* q = reinterpret_cast<const unsigned char*>(utf8Text); *q; ++q) {
+    if ((*q & 0xC0) != 0x80 && inputCount < MAX_PAGE_GLYPHS) inputCount++;
+  }
+  uint32_t ligatureCapacity = 0;
+  if (!metadataOnly) {
+    for (uint8_t si = 0; si < MAX_STYLES; si++) {
+      if ((styleMask & (1 << si)) && styles_[si].present) {
+        ligatureCapacity += styles_[si].header.ligaturePairCount;
+      }
+    }
+  }
+  const uint32_t codepointCapacity = inputCount + 1 + ligatureCapacity;
+  std::unique_ptr<uint32_t[]> codepoints(new (std::nothrow) uint32_t[codepointCapacity]);
   if (!codepoints) {
-    LOG_ERR("SDCF", "Failed to allocate codepoint buffer (%u bytes)", MAX_PAGE_GLYPHS * 4);
+    LOG_ERR("SDCF", "Failed to allocate codepoint buffer (%u bytes)", codepointCapacity * 4);
     return -1;
   }
   uint32_t cpCount = 0;
 
   const unsigned char* p = reinterpret_cast<const unsigned char*>(utf8Text);
-  while (*p && cpCount < MAX_PAGE_GLYPHS) {
+  while (*p && cpCount < inputCount) {
     uint32_t cp = utf8NextCodepoint(&p);
     if (cp == 0) break;
-
-    bool found = false;
-    for (uint32_t i = 0; i < cpCount; i++) {
-      if (codepoints[i] == cp) {
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
-      codepoints[cpCount++] = cp;
-    }
+    codepoints[cpCount++] = cp;
   }
+  const bool hitCap = *p != '\0';
+
+  std::sort(codepoints.get(), codepoints.get() + cpCount);
+  cpCount = static_cast<uint32_t>(std::unique(codepoints.get(), codepoints.get() + cpCount) - codepoints.get());
 
   // Always include the replacement character
-  {
-    bool hasReplacement = false;
-    for (uint32_t i = 0; i < cpCount; i++) {
-      if (codepoints[i] == REPLACEMENT_GLYPH) {
-        hasReplacement = true;
-        break;
-      }
-    }
-    if (!hasReplacement && cpCount < MAX_PAGE_GLYPHS) {
-      codepoints[cpCount++] = REPLACEMENT_GLYPH;
-    }
+  if (!std::binary_search(codepoints.get(), codepoints.get() + cpCount, REPLACEMENT_GLYPH)) {
+    codepoints[cpCount++] = REPLACEMENT_GLYPH;
   }
 
   // Add ligature output codepoints from all styles being prewarmed.
@@ -802,7 +789,7 @@ int SdCardFont::prewarm(const char* utf8Text, uint8_t styleMask, bool metadataOn
 
       loadStyleKernLigatureData(s);
       if (s.ligaturePairs && s.header.ligaturePairCount > 0) {
-        for (uint8_t li = 0; li < s.header.ligaturePairCount && cpCount < MAX_PAGE_GLYPHS; li++) {
+        for (uint8_t li = 0; li < s.header.ligaturePairCount; li++) {
           uint32_t leftCp = s.ligaturePairs[li].pair >> 16;
           uint32_t rightCp = s.ligaturePairs[li].pair & 0xFFFF;
           uint32_t outCp = s.ligaturePairs[li].ligatureCp;
@@ -822,9 +809,7 @@ int SdCardFont::prewarm(const char* utf8Text, uint8_t styleMask, bool metadataOn
               break;
             }
           }
-          if (!hasOut) {
-            codepoints[cpCount++] = outCp;
-          }
+          if (!hasOut) codepoints[cpCount++] = outCp;
         }
       }
     }
@@ -832,6 +817,10 @@ int SdCardFont::prewarm(const char* utf8Text, uint8_t styleMask, bool metadataOn
 
   // Sort codepoints for ordered interval building
   std::sort(codepoints.get(), codepoints.get() + cpCount);
+  cpCount = static_cast<uint32_t>(std::unique(codepoints.get(), codepoints.get() + cpCount) - codepoints.get());
+  if (hitCap) {
+    LOG_ERR("SDCF", "Page prewarm codepoint cap (%u) hit; excess glyphs use on-demand fallback", MAX_PAGE_GLYPHS);
+  }
 
   // Prewarm each requested style
   int totalMissed = 0;
@@ -855,16 +844,11 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
   if (s.miniGlyphCount > 0 && !(s.miniMetadataOnly && !metadataOnly)) {
     bool covered = true;
     int missedInMini = 0;
+    uint32_t miniInterval = 0;
     for (uint32_t i = 0; i < cpCount && covered; i++) {
       const uint32_t cp = codepoints[i];
-      bool inMini = false;
-      for (uint32_t iv = 0; iv < s.miniIntervalCount; iv++) {
-        if (cp < s.miniIntervals[iv].first) break;  // intervals sorted ascending
-        if (cp <= s.miniIntervals[iv].last) {
-          inMini = true;
-          break;
-        }
-      }
+      while (miniInterval < s.miniIntervalCount && s.miniIntervals[miniInterval].last < cp) miniInterval++;
+      const bool inMini = miniInterval < s.miniIntervalCount && s.miniIntervals[miniInterval].first <= cp;
       if (inMini) continue;
       if (findGlobalGlyphIndex(s, cp) < 0) {
         missedInMini++;  // not in font coverage: the rebuild couldn't load it either
@@ -1220,10 +1204,20 @@ int SdCardFont::fetchAdvancesForCodepoints(uint32_t* codepoints, uint32_t cpCoun
     if (!(styleMask & (1 << si)) || !styles_[si].present) continue;
     const auto& s = styles_[si];
 
-    // Stop fetching once the cache is full — further inserts would be dropped
-    // by the merge anyway. The renderer fast path tolerates missing entries
-    // (returns 0); the slow path is still correct for those codepoints.
-    if (advanceTableSize_[si] >= ADVANCE_CACHE_LIMIT) continue;
+    // Guarantee that the current layout can use the fast path.  Once the
+    // persistent cache can no longer absorb all newly requested codepoints,
+    // begin a new generation with this layout instead of permanently ignoring
+    // every character first encountered after the cache filled.
+    uint32_t uncachedCount = 0;
+    for (uint32_t i = 0; i < cpCount; i++) {
+      if (!advanceTableLookup(si, codepoints[i], nullptr)) uncachedCount++;
+    }
+    if (advanceTableSize_[si] + uncachedCount > ADVANCE_CACHE_LIMIT) {
+      LOG_DBG("SDCF", "Advance cache style %u rollover: old=%u incoming=%u", si, advanceTableSize_[si], cpCount);
+      delete[] advanceTable_[si];
+      advanceTable_[si] = nullptr;
+      advanceTableSize_[si] = 0;
+    }
 
     // For each codepoint in `codepoints`, skip those already cached, then
     // resolve to a glyph index. Build a parallel array sorted by glyph index
@@ -1325,31 +1319,39 @@ int SdCardFont::buildAdvanceTableRange(Iter begin, Iter end, bool includeSpace, 
 
   unsigned long startMs = millis();
 
-  // +2 reserved slots for space and hyphen injected after the main scan.
-  static constexpr uint32_t MAX_UNIQUE_CODEPOINTS = 4096;
-  uint32_t* codepoints = new (std::nothrow) uint32_t[MAX_UNIQUE_CODEPOINTS + 2];
+  // +2 reserved slots for space and hyphen injected after the main scan.  The
+  // 4096-entry raw-input cap preserves the previous 16 KB temporary bound;
+  // normal paragraphs are much smaller, while pathological ones retain the
+  // correct on-demand fallback for their tail.
+  static constexpr uint32_t MAX_LAYOUT_CODEPOINTS = 4096;
+  uint32_t* codepoints = new (std::nothrow) uint32_t[MAX_LAYOUT_CODEPOINTS + 2];
   if (!codepoints) {
-    LOG_ERR("SDCF", "buildAdvanceTable: failed to allocate codepoint buffer (%u bytes)", MAX_UNIQUE_CODEPOINTS * 4);
+    LOG_ERR("SDCF", "buildAdvanceTable: failed to allocate codepoint buffer (%u bytes)", MAX_LAYOUT_CODEPOINTS * 4);
     return -1;
   }
   uint32_t cpCount = 0;
   bool hitCap = false;
 
   for (auto it = begin; it != end && !hitCap; ++it) {
-    hitCap = collectUniqueCodepoints(asCStr(*it), codepoints, cpCount, MAX_UNIQUE_CODEPOINTS);
+    hitCap = collectCodepoints(asCStr(*it), codepoints, cpCount, MAX_LAYOUT_CODEPOINTS);
   }
   if (extraText && !hitCap) {
-    hitCap = collectUniqueCodepoints(extraText, codepoints, cpCount, MAX_UNIQUE_CODEPOINTS);
+    hitCap = collectCodepoints(extraText, codepoints, cpCount, MAX_LAYOUT_CODEPOINTS);
   }
 
-  if (includeSpace && std::none_of(codepoints, codepoints + cpCount, [](uint32_t c) { return c == ' '; }))
-    codepoints[cpCount++] = ' ';
-  if (includeHyphen && std::none_of(codepoints, codepoints + cpCount, [](uint32_t c) { return c == '-'; }))
-    codepoints[cpCount++] = '-';
+  std::sort(codepoints, codepoints + cpCount);
+  cpCount = static_cast<uint32_t>(std::unique(codepoints, codepoints + cpCount) - codepoints);
+
+  const bool addSpace =
+      includeSpace && !std::binary_search(codepoints, codepoints + cpCount, static_cast<uint32_t>(' '));
+  const bool addHyphen =
+      includeHyphen && !std::binary_search(codepoints, codepoints + cpCount, static_cast<uint32_t>('-'));
+  if (addSpace) codepoints[cpCount++] = ' ';
+  if (addHyphen) codepoints[cpCount++] = '-';
 
   if (hitCap) {
-    LOG_ERR("SDCF", "buildAdvanceTable: unique codepoint cap (%u) hit, layout may be approximate",
-            MAX_UNIQUE_CODEPOINTS);
+    LOG_ERR("SDCF", "buildAdvanceTable: paragraph codepoint cap (%u) hit; tail uses on-demand fallback",
+            MAX_LAYOUT_CODEPOINTS);
   }
   std::sort(codepoints, codepoints + cpCount);
   int totalMissed = fetchAdvancesForCodepoints(codepoints, cpCount, styleMask);

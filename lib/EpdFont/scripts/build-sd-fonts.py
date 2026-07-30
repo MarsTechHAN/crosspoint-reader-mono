@@ -26,6 +26,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import os
 import shutil
 import subprocess
@@ -58,7 +59,15 @@ def _ipv4_only_getaddrinfo(*args, **kwargs):
     return [ai for ai in _orig_getaddrinfo(*args, **kwargs) if ai[0] == socket.AF_INET]
 
 
-def download_font(url: str, dest: Path, retries: int = 3) -> Path:
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def download_font(url: str, dest: Path, expected_sha256=None, retries: int = 3) -> Path:
     """Download a font file if not already cached. Returns the local path.
 
     Some sources (e.g. mirrors.ctan.org) are round-robin redirectors that land
@@ -67,7 +76,10 @@ def download_font(url: str, dest: Path, retries: int = 3) -> Path:
     Retry on failure, forcing IPv4 resolution after the first attempt.
     """
     if dest.exists():
-        return dest
+        if not expected_sha256 or file_sha256(dest) == expected_sha256.lower():
+            return dest
+        print(f"  Cached {dest.name} failed SHA-256; downloading it again...")
+        dest.unlink()
     dest.parent.mkdir(parents=True, exist_ok=True)
     print(f"  Downloading {dest.name}...")
     last_err = None
@@ -89,6 +101,13 @@ def download_font(url: str, dest: Path, retries: int = 3) -> Path:
     else:
         raise RuntimeError(f"Failed to download {url}: {last_err}") from last_err
     size_kb = dest.stat().st_size / 1024
+    if expected_sha256:
+        actual = file_sha256(dest)
+        if actual != expected_sha256.lower():
+            dest.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"SHA-256 mismatch for {url}: got {actual}, expected {expected_sha256.lower()}"
+            )
     print(f"  Downloaded {dest.name} ({size_kb:.0f} KB)")
     return dest
 
@@ -165,7 +184,7 @@ def resolve_font_path(style_spec: dict, family_name: str, style_name: str) -> Pa
         # Derive a stable filename from the URL
         filename = url.rsplit("/", 1)[-1]
         dest = DOWNLOAD_DIR / family_name / filename
-        resolved = download_font(url, dest)
+        resolved = download_font(url, dest, style_spec.get("sha256"))
     else:
         raise ValueError(f"{family_name}/{style_name}: must have 'path' or 'url'")
 
@@ -407,22 +426,33 @@ def main():
     print(f"\n=== Building {len(families)} families ({max_workers} parallel jobs, timeout {timeout}s) ===\n")
 
     failed = []
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(build_family, family, output_base, verbose, timeout): family["name"]
-            for family in families
-        }
-        for future in as_completed(futures):
-            name, success, message = future.result()
-            if success:
-                # Count output files
-                family_dir = output_base / name
-                count = len(list(family_dir.glob("*.cpfont")))
-                size = sum(f.stat().st_size for f in family_dir.glob("*.cpfont"))
-                print(f"  OK: {name} ({count} files, {size / 1024 / 1024:.1f} MB)")
-            else:
-                print(f"  FAILED: {name}: {message}", file=sys.stderr)
-                failed.append(name)
+
+    def report_result(result):
+        name, success, message = result
+        if success:
+            family_dir = output_base / name
+            count = len(list(family_dir.glob("*.cpfont")))
+            size = sum(f.stat().st_size for f in family_dir.glob("*.cpfont"))
+            print(f"  OK: {name} ({count} files, {size / 1024 / 1024:.1f} MB)")
+        else:
+            print(f"  FAILED: {name}: {message}", file=sys.stderr)
+            failed.append(name)
+
+    # Avoid a process pool for the common --jobs 1 case.  Besides saving a
+    # second Python/FreeType working set for large CJK fonts, this keeps the
+    # deterministic single-family build usable in restricted CI environments
+    # where POSIX semaphore sysconf calls are unavailable.
+    if max_workers == 1:
+        for family in families:
+            report_result(build_family(family, output_base, verbose, timeout))
+    else:
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(build_family, family, output_base, verbose, timeout): family["name"]
+                for family in families
+            }
+            for future in as_completed(futures):
+                report_result(future.result())
 
     # Summary
     print("\n=== Summary ===\n")

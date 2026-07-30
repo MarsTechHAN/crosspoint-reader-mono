@@ -62,8 +62,28 @@ void FontCacheManager::resetStats() {
 bool FontCacheManager::isScanning() const { return scanMode_ == ScanMode::Scanning; }
 
 void FontCacheManager::recordText(const char* text, int fontId, EpdFontFamily::Style style) {
-  scanText_ += text;
-  if (scanFontId_ < 0) scanFontId_ = fontId;
+  ScanBucket* bucket = nullptr;
+  for (uint8_t i = 0; i < scanBucketCount_; i++) {
+    if (scanBuckets_[i].fontId == fontId) {
+      bucket = &scanBuckets_[i];
+      break;
+    }
+  }
+  if (!bucket) {
+    if (scanBucketCount_ >= MAX_SCAN_FONTS) {
+      if (!scanBucketOverflowLogged_) {
+        LOG_ERR("FCM", "Page uses more than %u fonts; excess glyphs will use the miss path", MAX_SCAN_FONTS);
+        scanBucketOverflowLogged_ = true;
+      }
+      return;
+    }
+    bucket = &scanBuckets_[scanBucketCount_++];
+    bucket->fontId = fontId;
+    bucket->text.clear();
+    bucket->text.reserve(scanBucketCount_ == 1 ? 2048 : 256);
+    memset(bucket->styleCounts, 0, sizeof(bucket->styleCounts));
+  }
+  bucket->text += text;
   const uint8_t baseStyle = static_cast<uint8_t>(style) & 0x03;
   const unsigned char* p = reinterpret_cast<const unsigned char*>(text);
   uint32_t cpCount = 0;
@@ -71,7 +91,7 @@ void FontCacheManager::recordText(const char* text, int fontId, EpdFontFamily::S
     if ((*p & 0xC0) != 0x80) cpCount++;
     p++;
   }
-  scanStyleCounts_[baseStyle] += cpCount;
+  bucket->styleCounts[baseStyle] += cpCount;
 }
 
 // --- PrewarmScope implementation ---
@@ -80,29 +100,25 @@ FontCacheManager::PrewarmScope::PrewarmScope(FontCacheManager& manager) : manage
   manager_->scanMode_ = ScanMode::Scanning;
   manager_->clearCache();
   manager_->resetStats();
-  manager_->scanText_.clear();
-  manager_->scanText_.reserve(2048);  // Pre-allocate to avoid heap fragmentation from repeated concat
-  memset(manager_->scanStyleCounts_, 0, sizeof(manager_->scanStyleCounts_));
-  manager_->scanFontId_ = -1;
+  manager_->scanBucketCount_ = 0;
+  manager_->scanBucketOverflowLogged_ = false;
 }
 
 void FontCacheManager::PrewarmScope::endScanAndPrewarm() {
   manager_->scanMode_ = ScanMode::None;
-  if (manager_->scanText_.empty()) return;
-
-  // Build style bitmask from all styles that appeared during the scan
-  uint8_t styleMask = 0;
-  for (uint8_t i = 0; i < 4; i++) {
-    if (manager_->scanStyleCounts_[i] > 0) styleMask |= (1 << i);
+  for (uint8_t b = 0; b < manager_->scanBucketCount_; b++) {
+    auto& bucket = manager_->scanBuckets_[b];
+    if (bucket.text.empty()) continue;
+    uint8_t styleMask = 0;
+    for (uint8_t i = 0; i < 4; i++) {
+      if (bucket.styleCounts[i] > 0) styleMask |= (1 << i);
+    }
+    if (styleMask == 0) styleMask = 1;
+    manager_->prewarmCache(bucket.fontId, bucket.text.c_str(), styleMask);
+    // Retain each string's capacity across pages to avoid allocator churn.
+    bucket.text.clear();
   }
-  if (styleMask == 0) styleMask = 1;  // default to regular
-
-  manager_->prewarmCache(manager_->scanFontId_, manager_->scanText_.c_str(), styleMask);
-
-  // Keep the small scan allocation across pages. Releasing it here made every
-  // render reserve and free the same buffer again, adding allocator churn to
-  // the page-turn hot path.
-  manager_->scanText_.clear();
+  manager_->scanBucketCount_ = 0;
 }
 
 FontCacheManager::PrewarmScope::~PrewarmScope() {

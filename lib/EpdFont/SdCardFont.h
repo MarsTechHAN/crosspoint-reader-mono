@@ -20,7 +20,11 @@
 
 class SdCardFont {
  public:
-  static constexpr uint16_t MAX_PAGE_GLYPHS = 512;
+  // Upper bound for unique glyphs collected by one render prewarm.  Chinese
+  // pages have far more unique codepoints than Latin pages; 512 made the tail
+  // fall through to synchronous per-glyph SD reads.  The temporary buffers are
+  // allocated on the heap (PSRAM on Paper Mono) and released after prewarm.
+  static constexpr uint16_t MAX_PAGE_GLYPHS = 2048;
   static constexpr uint8_t MAX_STYLES = 4;
 
   SdCardFont() = default;
@@ -263,8 +267,10 @@ class SdCardFont {
   // Per-style advance table. Sorted by codepoint for binary lookup.
   // Bounded to ADVANCE_CACHE_LIMIT entries; persists across layout passes
   // (across calls to clearCache()) so repeated indexing of the same font
-  // amortizes SD reads. Cleared only on font unload or clearPersistentCache().
-  static constexpr uint32_t ADVANCE_CACHE_LIMIT = 768;
+  // amortizes SD reads.  If a new layout no longer fits, the cache starts a
+  // new generation containing that layout's glyphs rather than freezing and
+  // forcing every later CJK glyph through the synchronous miss path.
+  static constexpr uint32_t ADVANCE_CACHE_LIMIT = 8192;
   AdvanceEntry* advanceTable_[MAX_STYLES] = {};
   uint32_t advanceTableSize_[MAX_STYLES] = {};
   bool advanceTableLookup(uint8_t styleIdx, uint32_t codepoint, uint16_t* outAdvance) const;

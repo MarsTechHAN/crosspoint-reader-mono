@@ -14,6 +14,7 @@
 #   styles:      Map of style name -> font source
 #                  path: relative to lib/EpdFont (for committed fonts)
 #                  url:  download URL (for fonts not in the repo)
+#                  sha256: optional source checksum (required for pinned releases)
 #
 # Variable fonts:
 #   Some fonts (Bitter, Inter, Alegreya) are distributed as variable fonts.
@@ -31,6 +32,23 @@
 #   Requires fonttools: pip install -r requirements.txt
 
 families:
+  # LXGW WenKai is the Chinese reading face used by EDCBook.  Pin the official
+  # release and checksums so generated .cpfont assets are reproducible.  Medium
+  # serves bold; italic requests intentionally fall back to Regular/Medium.
+  # License: SIL Open Font License 1.1
+  # Source: https://github.com/lxgw/LxgwWenKai/releases/tag/v1.522
+  - name: LXGWWenKai
+    description: "霞鹜文楷，适合中英文混排阅读（简繁中文、日文、拉丁文）"
+    intervals: latin-ext,cjk
+    sizes: [8, 10, 12, 14, 16, 18]
+    styles:
+      regular:
+        url: "https://github.com/lxgw/LxgwWenKai/releases/download/v1.522/LXGWWenKai-Regular.ttf"
+        sha256: "39ad71264b588165b469e35e6afb162a378dacd1f95348160240ba9038ac3009"
+      bold:
+        url: "https://github.com/lxgw/LxgwWenKai/releases/download/v1.522/LXGWWenKai-Medium.ttf"
+        sha256: "d4bdeb38a39151d74d084cba5090f8cb7d20bf83eedb78c35939ae70b9f4e3f6"
+
   # ── Serif ──────────────────────────────────────────────────────────────
 
   - name: Literata
@@ -250,4 +268,3 @@ families:
       bold:       {url: "https://raw.githubusercontent.com/jacobxperez/lexica-ultralegible/main/fonts/ttf/LexicaUltralegible-Bold.ttf"}
       italic:     {url: "https://raw.githubusercontent.com/jacobxperez/lexica-ultralegible/main/fonts/ttf/LexicaUltralegible-Italic.ttf"}
       bolditalic: {url: "https://raw.githubusercontent.com/jacobxperez/lexica-ultralegible/main/fonts/ttf/LexicaUltralegible-BoldItalic.ttf"}
-

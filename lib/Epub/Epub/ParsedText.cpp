@@ -73,6 +73,8 @@ bool isNoBreakBeforeCjkPunctuation(const uint32_t cp) {
     case 0x00BB:  // »
     case 0x2019:  // ’
     case 0x201D:  // ”
+    case 0x2025:  // two dot leader
+    case 0x2026:  // ellipsis
     case 0x3001:  // 、
     case 0x3002:  // 。
     case 0x3009:  // 〉
@@ -84,6 +86,12 @@ bool isNoBreakBeforeCjkPunctuation(const uint32_t cp) {
     case 0x3017:  // 〗
     case 0x3019:  // 〙
     case 0x301B:  // 〛
+    case 0x303B:  // vertical ideographic iteration mark
+    case 0x309D:  // hiragana iteration mark
+    case 0x309E:  // hiragana voiced iteration mark
+    case 0x30FC:  // katakana-hiragana prolonged sound mark
+    case 0x30FD:  // katakana iteration mark
+    case 0x30FE:  // katakana voiced iteration mark
     case 0xFF01:  // ！
     case 0xFF09:  // ）
     case 0xFF0C:  // ，
@@ -95,7 +103,12 @@ bool isNoBreakBeforeCjkPunctuation(const uint32_t cp) {
     case 0xFF5D:  // ｝
       return true;
     default:
-      return false;
+      // Small kana must stay with the preceding character (JLReq kinsoku).
+      return cp == 0x3041 || cp == 0x3043 || cp == 0x3045 || cp == 0x3047 || cp == 0x3049 || cp == 0x3063 ||
+             cp == 0x3083 || cp == 0x3085 || cp == 0x3087 || cp == 0x308E || cp == 0x3095 || cp == 0x3096 ||
+             cp == 0x30A1 || cp == 0x30A3 || cp == 0x30A5 || cp == 0x30A7 || cp == 0x30A9 || cp == 0x30C3 ||
+             cp == 0x30E3 || cp == 0x30E5 || cp == 0x30E7 || cp == 0x30EE || cp == 0x30F5 || cp == 0x30F6 ||
+             (cp >= 0x31F0 && cp <= 0x31FF);
   }
 }
 
@@ -136,43 +149,56 @@ bool containsCjkBreakableCodepoint(const std::string& text) {
   return false;
 }
 
+bool isAsciiOrFullwidthAlphaNumeric(const uint32_t cp) {
+  return (cp >= '0' && cp <= '9') || (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z') ||
+         (cp >= 0xFF10 && cp <= 0xFF19) || (cp >= 0xFF21 && cp <= 0xFF3A) || (cp >= 0xFF41 && cp <= 0xFF5A);
+}
+
+bool isAsciiOrFullwidthDigit(const uint32_t cp) { return (cp >= '0' && cp <= '9') || (cp >= 0xFF10 && cp <= 0xFF19); }
+
+bool isNumericPrefix(const uint32_t cp) {
+  return cp == '$' || cp == 0x00A3 || cp == 0x00A5 || cp == 0x20AC || cp == 0xFFE5;
+}
+
+bool isNumericSuffix(const uint32_t cp) {
+  return cp == '%' || cp == 0x00B0 || cp == 0x2030 || cp == 0x2103 || cp == 0xFF05;
+}
+
 bool hasCjkBreakOpportunityBetween(const uint32_t leftCp, const uint32_t rightCp) {
   if (!utf8IsCjkBreakable(leftCp) && !utf8IsCjkBreakable(rightCp)) return false;
   if (isNoBreakAfterCjkPunctuation(leftCp) || isNoBreakBeforeCjkPunctuation(rightCp)) return false;
   if (utf8IsCombiningMark(rightCp)) return false;
+  // UAX #14-style protection for runs that happen to use fullwidth forms.
+  // utf8IsCjkBreakable intentionally includes those forms, but a serial number
+  // or Latin acronym must not become one breakable token per character.
+  if (isAsciiOrFullwidthAlphaNumeric(leftCp) && isAsciiOrFullwidthAlphaNumeric(rightCp)) return false;
+  if (isNumericPrefix(leftCp) && isAsciiOrFullwidthDigit(rightCp)) return false;
+  if (isAsciiOrFullwidthDigit(leftCp) && isNumericSuffix(rightCp)) return false;
+  // Paired leaders/dashes are a single typographic unit in Chinese text.
+  if ((leftCp == 0x2025 && rightCp == 0x2025) || (leftCp == 0x2026 && rightCp == 0x2026) ||
+      (leftCp == 0x2014 && rightCp == 0x2014)) {
+    return false;
+  }
   return true;
 }
 
 std::vector<size_t> cjkCharacterBreakByteOffsets(const std::string& text) {
-  struct CodepointBoundary {
-    uint32_t cp;
-    size_t endOffset;
-  };
-
-  std::vector<CodepointBoundary> codepoints;
-  codepoints.reserve(text.size());
-  bool hasCjkBreakable = false;
-
   const auto* ptr = reinterpret_cast<const unsigned char*>(text.c_str());
   const auto* const start = ptr;
-  while (*ptr) {
-    const uint32_t cp = utf8NextCodepoint(&ptr);
-    if (cp == 0) break;
-    if (utf8IsCjkBreakable(cp)) {
-      hasCjkBreakable = true;
-    }
-    codepoints.push_back({cp, static_cast<size_t>(ptr - start)});
-  }
-
-  if (!hasCjkBreakable || codepoints.size() < 2) return {};
+  uint32_t previous = utf8NextCodepoint(&ptr);
+  if (previous == 0 || *ptr == '\0') return {};
+  size_t previousEnd = static_cast<size_t>(ptr - start);
 
   std::vector<size_t> allowedOffsets;
-  allowedOffsets.reserve(codepoints.size() - 1);
-  for (size_t i = 0; i + 1 < codepoints.size(); ++i) {
-    const uint32_t current = codepoints[i].cp;
-    const uint32_t next = codepoints[i + 1].cp;
-    if (!hasCjkBreakOpportunityBetween(current, next)) continue;
-    allowedOffsets.push_back(codepoints[i].endOffset);
+  while (*ptr) {
+    const uint32_t current = utf8NextCodepoint(&ptr);
+    if (current == 0) break;
+    if (hasCjkBreakOpportunityBetween(previous, current)) {
+      if (allowedOffsets.empty()) allowedOffsets.reserve(text.size() / 2 + 1);
+      allowedOffsets.push_back(previousEnd);
+    }
+    previous = current;
+    previousEnd = static_cast<size_t>(ptr - start);
   }
   return allowedOffsets;
 }
@@ -262,6 +288,8 @@ void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle,
   // precomposed glyph is used instead. This runs once per word at layout time (the
   // result is cached in the section file) and is a cheap no-op for mark-free text.
   word = utf8ComposeNfc(word);
+  const bool wordContainsCjk = containsCjkBreakableCodepoint(word);
+  hasCjkWord = hasCjkWord || wordContainsCjk;
 
   EpdFontFamily::Style baseStyle = fontStyle;
   if (underline) {
@@ -312,30 +340,30 @@ void ParsedText::addWord(std::string word, const EpdFontFamily::Style fontStyle,
     }
   };
 
-  if (auto breakOffsets = cjkCharacterBreakByteOffsets(word); !breakOffsets.empty()) {
-    // CJK-heavy paragraphs can push hundreds of tiny tokens quickly when CSS toggles
-    // inline styles. Reserve once up front to avoid repeated vector growth reallocations.
-    ensureTokenCapacity(breakOffsets.size() + 1);
-    bool firstToken = true;
-    size_t tokenStart = 0;
-    for (const size_t breakOffset : breakOffsets) {
-      if (breakOffset <= tokenStart || breakOffset > word.size()) continue;
-      pushToken(word.substr(tokenStart, breakOffset - tokenStart), firstToken ? effectiveAttachToPrevious : false,
-                firstToken ? effectiveNoSpaceBefore : true, false);
-      firstToken = false;
-      tokenStart = breakOffset;
+  if (wordContainsCjk) {
+    auto breakOffsets = cjkCharacterBreakByteOffsets(word);
+    if (!breakOffsets.empty()) {
+      // CJK-heavy paragraphs can push hundreds of tiny tokens quickly when CSS toggles
+      // inline styles. Reserve once up front to avoid repeated vector growth reallocations.
+      ensureTokenCapacity(breakOffsets.size() + 1);
+      bool firstToken = true;
+      size_t tokenStart = 0;
+      for (const size_t breakOffset : breakOffsets) {
+        if (breakOffset <= tokenStart || breakOffset > word.size()) continue;
+        pushToken(word.substr(tokenStart, breakOffset - tokenStart), firstToken ? effectiveAttachToPrevious : false,
+                  firstToken ? effectiveNoSpaceBefore : true, false);
+        firstToken = false;
+        tokenStart = breakOffset;
+      }
+      if (tokenStart < word.size()) {
+        pushToken(word.substr(tokenStart), firstToken ? effectiveAttachToPrevious : false,
+                  firstToken ? effectiveNoSpaceBefore : true, false);
+      }
+      if (wordStartsRtl) {
+        hasRtlWord = true;
+      }
+      return;
     }
-    if (tokenStart < word.size()) {
-      pushToken(word.substr(tokenStart), firstToken ? effectiveAttachToPrevious : false,
-                firstToken ? effectiveNoSpaceBefore : true, false);
-    }
-    if (wordStartsRtl) {
-      hasRtlWord = true;
-    }
-    return;
-  }
-
-  if (containsCjkBreakableCodepoint(word)) {
     pushToken(std::move(word), effectiveAttachToPrevious, effectiveNoSpaceBefore, false);
     if (wordStartsRtl) {
       hasRtlWord = true;
@@ -499,6 +527,11 @@ int ParsedText::resolveFirstLineIndent(const bool isFirstLine, const GfxRenderer
     return 0;
   }
   if (!extraParagraphSpacing) {
+    if (hasCjkWord) {
+      const int cjkIndent =
+          renderer.getTextAdvanceX(fontId, "\xE3\x80\x80\xE3\x80\x80", EpdFontFamily::REGULAR);  // two U+3000
+      if (cjkIndent > 0) return cjkIndent;
+    }
     return renderer.getSpaceWidth(fontId, EpdFontFamily::REGULAR) * 3;
   }
   return 0;
@@ -1207,8 +1240,7 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
     const int reorderedSpare = effectivePageWidth - reorderedWordWidthSum - reorderedNaturalGaps;
     const bool reorderedJustifyLine = effectiveAlignment == CssTextAlign::Justify && !isLastLine &&
                                       reorderedGapCount >= MIN_JUSTIFY_GAPS && reorderedSpare > 0;
-    const int reorderedJustifyExtra =
-        reorderedJustifyLine ? computeJustifyExtra(reorderedSpare, reorderedGapCount) : 0;
+    const int reorderedJustifyExtra = reorderedJustifyLine ? computeJustifyExtra(reorderedSpare, reorderedGapCount) : 0;
     const size_t reorderedJustifyRemainder =
         reorderedJustifyLine ? static_cast<size_t>(reorderedSpare % reorderedGapCount) : 0;
 
@@ -1233,8 +1265,7 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
 
     size_t reorderedJustifyGap = 0;
     const auto takeReorderedJustify = [&]() {
-      return reorderedJustifyExtra +
-             (reorderedJustifyGap++ < reorderedJustifyRemainder ? 1 : 0);
+      return reorderedJustifyExtra + (reorderedJustifyGap++ < reorderedJustifyRemainder ? 1 : 0);
     };
     for (size_t wordIdx = 0; wordIdx < reorderedWidthsScratch.size(); wordIdx++) {
       lineXPos.push_back(static_cast<int16_t>(xpos));
@@ -1283,9 +1314,7 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
       // For Right and Justify, start from right edge (xpos = effectivePageWidth)
 
       size_t justifyGap = 0;
-      const auto takeJustify = [&]() {
-        return justifyExtra + (justifyGap++ < justifyRemainder ? 1 : 0);
-      };
+      const auto takeJustify = [&]() { return justifyExtra + (justifyGap++ < justifyRemainder ? 1 : 0); };
       for (size_t wordIdx = 0; wordIdx < lineWordCount; wordIdx++) {
         xpos -= wordWidths[lastBreakAt + wordIdx];
         lineXPos.push_back(static_cast<int16_t>(xpos));
@@ -1296,8 +1325,7 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
           int advance = renderer.getKerning(fontId, lastCodepoint(lineWords[wordIdx]),
                                             firstCodepoint(lineWords[wordIdx + 1]), lineWordStyles[wordIdx]);
           // wordIdx > 0: see the LTR branch — a leading no-break space is not a justifiable gap.
-          if (wordIdx > 0 && lineWords[wordIdx] == " " && continuesVec[lastBreakAt + wordIdx] &&
-              justifyLine) {
+          if (wordIdx > 0 && lineWords[wordIdx] == " " && continuesVec[lastBreakAt + wordIdx] && justifyLine) {
             advance += takeJustify();
           }
           xpos -= advance;
@@ -1327,9 +1355,7 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
       }
 
       size_t justifyGap = 0;
-      const auto takeJustify = [&]() {
-        return justifyExtra + (justifyGap++ < justifyRemainder ? 1 : 0);
-      };
+      const auto takeJustify = [&]() { return justifyExtra + (justifyGap++ < justifyRemainder ? 1 : 0); };
       for (size_t wordIdx = 0; wordIdx < lineWordCount; wordIdx++) {
         lineXPos.push_back(static_cast<int16_t>(xpos));
 
@@ -1341,8 +1367,7 @@ void ParsedText::extractLine(const size_t breakIndex, const int pageWidth, const
           // wordIdx > 0 mirrors the gap accounting above (which skips index 0): a leading
           // no-break space must not receive justifyExtra, or the line over-stretches by one
           // gap and the last word is pushed past the right margin (issue #2185).
-          if (wordIdx > 0 && lineWords[wordIdx] == " " && continuesVec[lastBreakAt + wordIdx] &&
-              justifyLine) {
+          if (wordIdx > 0 && lineWords[wordIdx] == " " && continuesVec[lastBreakAt + wordIdx] && justifyLine) {
             advance += takeJustify();
           }
           xpos += advance;
