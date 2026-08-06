@@ -15,6 +15,9 @@
 #include "ReaderFontSizes.h"
 #include "SdCardFontSystem.h"
 #include "TextSettingsPreview.h"
+// For useBalancedReaderRefresh(): the dimming predicate below has to agree with
+// the reader's own test, not re-derive it.
+#include "activities/reader/ReaderUtils.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
@@ -78,7 +81,13 @@ void TextSettingsActivity::onEnter() {
   requestUpdate();
 }
 
-void TextSettingsActivity::onExit() { Activity::onExit(); }
+void TextSettingsActivity::onExit() {
+  // onExit() runs on every teardown path -- the Back pop, and the touch home
+  // gesture's replaceActivity() stack drain, which never runs resultHandler.
+  // The parent no longer saves for us, so this is the single write per visit.
+  if (settingsDirty_) SETTINGS.saveToFile();
+  Activity::onExit();
+}
 
 // The selectable sizes belong to the active family, so this runs on entry and
 // again after every family change. A family change goes through ensureLoaded(),
@@ -281,7 +290,14 @@ void TextSettingsActivity::render(RenderLock&&) {
       GUI.drawList(
           renderer, listRect, STYLE_ROWS, selectedItem,
           [](int index) { return std::string(I18N.get(ROW_NAME_IDS[index])); }, nullptr, nullptr,
-          [this](int index) { return styleValueText(index); }, true);
+          [this](int index) { return styleValueText(index); }, true,
+          [](int index) {
+            // Anti-aliasing needs gray levels, and the Fast reader refresh mode is
+            // a pure black/white update that ignores the flag. Dim the row there
+            // so it reads as disabled rather than broken. Matches the same
+            // predicate in SettingsActivity.
+            return index == static_cast<int>(StyleRow::AntiAliasing) && !ReaderUtils::useBalancedReaderRefresh();
+          });
       confirmLabel = onTabBar ? tr(STR_FONT) : tr(STR_TOGGLE);
       break;
     }
@@ -339,20 +355,26 @@ void TextSettingsActivity::activateRow(int row) {
     case Tab::Family:
       if (row != currentFamilyIndex_) {
         applyFamily(row);
+        settingsDirty_ = true;
         requestUpdate();
       }
       break;
     case Tab::Size:
       if (row != currentSizeIndex_) {
         applySize(row);
+        settingsDirty_ = true;
         requestUpdate();
       }
       break;
     case Tab::Layout:
+      // Marked here rather than inside each case: three of the four rows only
+      // open a popup whose stateless [](int) callback cannot reach this flag.
       confirmLayoutRow(row);
+      settingsDirty_ = true;
       break;
     case Tab::Style:
       confirmStyleRow(row);
+      settingsDirty_ = true;
       break;
     default:
       break;

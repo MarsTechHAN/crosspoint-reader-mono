@@ -27,6 +27,9 @@
 #include "StatusBarSettingsActivity.h"
 #include "TextSettingsActivity.h"
 #include "activities/network/WifiSelectionActivity.h"
+// For useBalancedReaderRefresh(): the dimming predicate below has to agree with
+// the reader's own test, not re-derive it.
+#include "activities/reader/ReaderUtils.h"
 #include "activities/util/IntervalSelectionActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -425,12 +428,12 @@ void SettingsActivity::toggleCurrentSetting() {
                                });
         break;
       case SettingAction::TextSettings:
+        // No saveToFile() here: TextSettingsActivity::onExit() persists its own
+        // edits, because this handler only runs on the pop path and the touch
+        // home gesture leaves through replaceActivity() instead.
         startActivityForResult(std::make_unique<TextSettingsActivity>(renderer, mappedInput, &sdFontSystem.registry(),
                                                                       TextSettingsActivity::Tab::Family),
-                               [this](const ActivityResult&) {
-                                 SETTINGS.saveToFile();
-                                 rebuildSettingsLists();
-                               });
+                               [this](const ActivityResult&) { rebuildSettingsLists(); });
         break;
       case SettingAction::GrayCalibration:
         startActivityForResult(std::make_unique<GrayCalibrationActivity>(renderer, mappedInput), resultHandler);
@@ -587,7 +590,22 @@ void SettingsActivity::render(RenderLock&&) {
         }
         return valueText;
       },
-      true);
+      true,
+      [&settings](int i) {
+        // Dim what the current configuration makes inert, so a toggle that
+        // visibly changes nothing on the page reads as disabled rather than
+        // broken. The row stays selectable — changing the setting it depends on
+        // brings it straight back.
+        switch (settings[i].nameId) {
+          case StrId::STR_TEXT_AA:
+            // Anti-aliasing needs gray levels; the Fast reader refresh mode is a
+            // pure black/white update, so the flag is ignored there. See
+            // useBalancedReaderRefresh() in ReaderUtils.h.
+            return !ReaderUtils::useBalancedReaderRefresh();
+          default:
+            return false;
+        }
+      });
 
   // Draw help text
   const auto confirmLabel =

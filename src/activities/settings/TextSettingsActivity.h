@@ -45,6 +45,14 @@ class TextSettingsActivity final : public Activity {
   // Applies the row at the given list index for the active tab (Confirm and tap share this).
   void activateRow(int row);
 
+  // Set by activateRow(), consumed by onExit(). This screen is the only way to
+  // reach the ten .withTextSettings() entries on device, so it must persist its
+  // own edits: the parent's startActivityForResult() handler runs on the pop
+  // path only, and the touch home gesture tears the stack down through
+  // replaceActivity() instead, which never consults resultHandler. Guarded so
+  // merely opening and closing the screen does not rewrite settings.json.
+  bool settingsDirty_ = false;
+
   // Handles tab/list/swipe touch input; returns true if an event was consumed (caller returns).
   bool handleTouch();
 
