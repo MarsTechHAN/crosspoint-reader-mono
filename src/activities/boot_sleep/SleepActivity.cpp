@@ -234,8 +234,13 @@ void SleepActivity::renderBitmapSleepScreen(const Bitmap& bitmap) const {
   LOG_DBG("SLP", "drawing to %d x %d", x, y);
   renderer.clearScreen();
 
-  const bool hasGreyscale = bitmap.hasGreyscale() &&
-                            SETTINGS.sleepScreenCoverFilter == CrossPointSettings::SLEEP_SCREEN_COVER_FILTER::NO_FILTER;
+  const bool hasGreyscale =
+#if FREEINK_DEVICE_PAPERMONO
+      false;  // Paper Mono non-reader surfaces stay binary on the internal OTP waveform.
+#else
+      bitmap.hasGreyscale() &&
+      SETTINGS.sleepScreenCoverFilter == CrossPointSettings::SLEEP_SCREEN_COVER_FILTER::NO_FILTER;
+#endif
 
   renderer.setRenderMode(hasGreyscale ? GfxRenderer::BW_GRAY_BASE : GfxRenderer::BW);
   renderer.drawBitmap(bitmap, x, y, pageWidth, pageHeight, cropX, cropY);

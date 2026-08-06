@@ -335,7 +335,17 @@ void HomeActivity::render(RenderLock&&) {
                                             tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
+#if FREEINK_DEVICE_PAPERMONO
+  // First show Home through the ordinary OTP Fast path. When leaving a reader,
+  // submit the same Home frame once more as a forced all-pixel OTP update so the
+  // cleanup is a distinct, visible refresh instead of being merged into the
+  // reader-to-Home transition.
+  const bool runPostEnterRefresh = refreshAfterEnter && firstRenderDone && !postEnterRefreshDone;
+  renderer.displayBuffer(runPostEnterRefresh ? HalDisplay::FULL_REFRESH : HalDisplay::FAST_REFRESH);
+  if (runPostEnterRefresh) postEnterRefreshDone = true;
+#else
   renderer.displayBuffer();
+#endif
 
   if (!firstRenderDone) {
     firstRenderDone = true;

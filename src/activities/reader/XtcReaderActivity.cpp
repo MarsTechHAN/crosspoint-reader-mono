@@ -337,6 +337,22 @@ void XtcReaderActivity::renderPage() {
       }
     }
 
+    if (!ReaderUtils::useBalancedReaderRefresh()) {
+      // Fast maps the pre-rendered four levels onto the binary precursor above
+      // and stays entirely on Paper Mono's internal OTP waveform.
+      ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
+      free(pageBuffer);
+      LOG_DBG("XTR", "Rendered page %lu/%lu (2-bit source, binary Fast)", currentPage + 1,
+              xtc->getPageCount());
+      return;
+    }
+
+#if FREEINK_DEVICE_PAPERMONO
+    // Hold the binary precursor in host RAM until both selector planes arrive;
+    // the SSD1677 driver then presents the complete three-level target once.
+    renderer.displayGrayscaleBase(ReaderUtils::refreshModeForCycle(pagesUntilFullRefresh));
+    ReaderUtils::advanceRefreshCycle(pagesUntilFullRefresh);
+#else
     if (pagesUntilFullRefresh <= 1) {
       // Periodic ghost cleanup: scrub via the normal path, then run the
       // settle flavor of the grayscale base pass (DTM planes are equal after
@@ -350,6 +366,7 @@ void XtcReaderActivity::renderPage() {
       renderer.displayGrayscaleBase(HalDisplay::FAST_REFRESH);
       pagesUntilFullRefresh--;
     }
+#endif
 
     // The primary two-level page is now visible. Keep the framebuffer as-is
     // and yield immediately when another page turn was queued during it.

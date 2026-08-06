@@ -33,3 +33,5 @@ lib/EpdFont/scripts/output/
 /sdkconfig.defaults
 sdkconfig.sticky
 /sdkconfig.paper_mono
+# Packaged firmware images and bundled SD-card fonts.
+/dist

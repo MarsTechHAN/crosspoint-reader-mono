@@ -129,6 +129,15 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     REFRESH_FREQUENCY_COUNT
   };
 
+  // Paper Mono reader page-turn policy. UI screens always remain binary and
+  // use the controller's internal OTP fast waveform; this setting only gates
+  // grayscale composition inside book readers.
+  enum READER_REFRESH_MODE {
+    READER_REFRESH_FAST = 0,
+    READER_REFRESH_BALANCED = 1,
+    READER_REFRESH_MODE_COUNT
+  };
+
   // Short power button press actions
   enum SHORT_PWRBTN { IGNORE = 0, SLEEP = 1, PAGE_TURN = 2, FORCE_REFRESH = 3, FOOTNOTES = 4, SHORT_PWRBTN_COUNT };
 
@@ -199,6 +208,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Text rendering settings
   uint8_t extraParagraphSpacing = 1;
   uint8_t textAntiAliasing = 1;
+  uint8_t readerRefreshMode = READER_REFRESH_BALANCED;
   // Short power button click behaviour
   uint8_t shortPwrBtn = IGNORE;
   // EPUB reading orientation settings

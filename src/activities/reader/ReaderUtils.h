@@ -110,25 +110,26 @@ inline bool isTouchMenuGesture(const MappedInputManager& input) {
   return SETTINGS.touchReaderControls && input.hasTouch() && input.wasMenuGesture();
 }
 
-// One helper, blocking or deferred: the async form starts the refresh and
-// returns so the caller can overlap CPU work with the panel's refresh time.
-// Async callers must not touch the framebuffer until
-// renderer.waitRefreshComplete() and must rebuild the differential baseline
-// before the next page turn (the tiled grayscale cleanup does).
-inline void displayWithRefreshCycle(const GfxRenderer& renderer, int& pagesUntilFullRefresh, bool async = false) {
+inline bool useBalancedReaderRefresh() {
+#if FREEINK_DEVICE_PAPERMONO
+  return SETTINGS.readerRefreshMode == CrossPointSettings::READER_REFRESH_BALANCED;
+#else
+  return true;
+#endif
+}
+
+inline HalDisplay::RefreshMode refreshModeForCycle(int pagesUntilFullRefresh) {
 #if FREEINK_DEVICE_PAPERMONO
   // Paper Mono's FULL mode is the explicit black/white endpoint sweep. Keep
   // the user-selected cadence meaningful instead of substituting a HALF
   // differential update which cannot fully discharge accumulated ghosting.
-  const auto mode = (pagesUntilFullRefresh <= 1) ? HalDisplay::FULL_REFRESH : HalDisplay::FAST_REFRESH;
+  return (pagesUntilFullRefresh <= 1) ? HalDisplay::FULL_REFRESH : HalDisplay::FAST_REFRESH;
 #else
-  const auto mode = (pagesUntilFullRefresh <= 1) ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH;
+  return (pagesUntilFullRefresh <= 1) ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH;
 #endif
-  if (async) {
-    renderer.displayBufferAsync(mode);
-  } else {
-    renderer.displayBuffer(mode);
-  }
+}
+
+inline void advanceRefreshCycle(int& pagesUntilFullRefresh) {
   if (pagesUntilFullRefresh <= 1) {
     pagesUntilFullRefresh = SETTINGS.getRefreshFrequency();
   } else {
@@ -136,19 +137,40 @@ inline void displayWithRefreshCycle(const GfxRenderer& renderer, int& pagesUntil
   }
 }
 
+// One helper, blocking or deferred: the async form starts the refresh and
+// returns so the caller can overlap CPU work with the panel's refresh time.
+// Async callers must not touch the framebuffer until
+// renderer.waitRefreshComplete() and must rebuild the differential baseline
+// before the next page turn (the tiled grayscale cleanup does).
+inline void displayWithRefreshCycle(const GfxRenderer& renderer, int& pagesUntilFullRefresh, bool async = false) {
+  const auto mode = refreshModeForCycle(pagesUntilFullRefresh);
+  if (async) {
+    renderer.displayBufferAsync(mode);
+  } else {
+    renderer.displayBuffer(mode);
+  }
+  advanceRefreshCycle(pagesUntilFullRefresh);
+}
+
 // Grayscale anti-aliasing pass. Renders content twice (LSB + MSB) to build
 // the grayscale buffer. Only the content callback is re-rendered — status bars
 // and other overlays should be drawn before calling this.
 // Kept as a template to avoid std::function overhead; instantiated once per reader type.
 template <typename RenderFn>
-void renderAntiAliased(GfxRenderer& renderer, RenderFn&& renderFn) {
-  // The B/W page is already visible. A queued page turn should not spend CPU
-  // building gray planes or start any additional panel waveform.
+void renderAntiAliased(GfxRenderer& renderer, int& pagesUntilFullRefresh, RenderFn&& renderFn) {
+  // A queued page turn should not spend CPU building gray planes or start any
+  // panel waveform.
   if (renderer.displayWorkAborted()) return;
   if (!renderer.storeBwBuffer()) {
     LOG_ERR("READER", "Failed to store BW buffer for anti-aliasing");
+    displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
     return;
   }
+
+  // Paper Mono retains this B/W target in host RAM until the two gray selector
+  // planes are ready, so the user sees one direct 3-gray page transition. Other
+  // drivers keep their normal base-then-overlay implementation.
+  renderer.displayGrayscaleBase(refreshModeForCycle(pagesUntilFullRefresh));
 
   renderer.clearScreen(0x00);
   renderer.setRenderMode(GfxRenderer::GRAYSCALE_LSB);
@@ -171,6 +193,7 @@ void renderAntiAliased(GfxRenderer& renderer, RenderFn&& renderFn) {
   renderer.copyGrayscaleMsbBuffers();
 
   renderer.displayGrayBuffer();
+  advanceRefreshCycle(pagesUntilFullRefresh);
   renderer.setRenderMode(GfxRenderer::BW);
 
   renderer.restoreBwBuffer();

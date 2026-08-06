@@ -395,16 +395,24 @@ void TxtReaderActivity::renderPage() {
   renderLines();  // scan pass — text accumulated, no drawing
   scope.endScanAndPrewarm();
 
+  // Fast reader mode deliberately stays binary and therefore follows the same
+  // panel-internal OTP path as the rest of the UI. Balanced enables the custom
+  // three-level page transition when text anti-aliasing is also enabled.
+  const bool balancedGray = ReaderUtils::useBalancedReaderRefresh() && SETTINGS.textAntiAliasing;
+
   // BW rendering
-  renderer.setRenderMode(SETTINGS.textAntiAliasing ? GfxRenderer::BW_GRAY_BASE : GfxRenderer::BW);
+  renderer.setRenderMode(balancedGray ? GfxRenderer::BW_GRAY_BASE : GfxRenderer::BW);
   renderLines();
   renderer.setRenderMode(GfxRenderer::BW);
   renderStatusBar();
 
-  ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
-
-  if (SETTINGS.textAntiAliasing) {
-    ReaderUtils::renderAntiAliased(renderer, [&renderLines]() { renderLines(); });
+  if (balancedGray) {
+    // Paper Mono batches the B/W base and both gray selector planes into one
+    // source-aware page transition. The generic helper preserves the existing
+    // base-then-overlay behavior on panels which cannot batch them.
+    ReaderUtils::renderAntiAliased(renderer, pagesUntilFullRefresh, [&renderLines]() { renderLines(); });
+  } else {
+    ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh);
   }
   // scope destructor clears font cache via FontCacheManager
 }

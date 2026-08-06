@@ -1568,8 +1568,13 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   const bool pageHasImages = page->hasImages();
   const bool manualRefreshPending = forcedRefreshPending;
   forcedRefreshPending = false;
-  const bool needsTextGrayscale = SETTINGS.textAntiAliasing;
-  const bool needsAnyGrayscale = needsTextGrayscale || pageHasImages;
+  const bool balancedRefresh = ReaderUtils::useBalancedReaderRefresh();
+  const bool needsTextGrayscale = balancedRefresh && SETTINGS.textAntiAliasing;
+  const bool needsAnyGrayscale = balancedRefresh && (needsTextGrayscale || pageHasImages);
+  // Fast still uses the same midpoint threshold as the three-level precursor;
+  // it merely skips selector generation and the custom waveform. Rendering an
+  // image in plain BW mode maps every non-white source sample to black.
+  const bool needsGrayAwareBinaryBase = needsAnyGrayscale || pageHasImages;
   const bool tiledGrayscale = needsAnyGrayscale && renderer.supportsStripGrayscale();
   struct GrayscaleClipGuard {
     GfxRenderer& renderer;
@@ -1585,10 +1590,18 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     LOG_DBG("ERS", "Four-gray clip: x=%d..%d y=%d..%d", renderer.grayscaleClipX0(),
             renderer.grayscaleClipX1(), renderer.grayscaleClipY0(), renderer.grayscaleClipY1());
   }
-  // Keep the panel busy while both selector planes are composed. This applies
-  // to image pages too: their decoded pixel cache can now feed full PSRAM
-  // planes in one pass instead of forcing a blocking double-refresh pipeline.
-  const bool overlapRefresh = tiledGrayscale && renderer.supportsAsyncRefresh();
+  // Other panels can overlap selector composition with a base refresh. Paper
+  // Mono instead stages the complete B/W target and both selector planes in
+  // host RAM, then starts one source-aware grayscale transition.
+#if FREEINK_DEVICE_PAPERMONO
+  // Paper Mono must not expose a binary precursor. Its driver retains this
+  // complete B/W target until gray planes are staged, even when generic async
+  // overlap is unavailable (for example with fading compensation enabled).
+  const bool stageCompleteGrayTarget = needsAnyGrayscale;
+#else
+  const bool stageCompleteGrayTarget = false;
+#endif
+  const bool overlapRefresh = !stageCompleteGrayTarget && tiledGrayscale && renderer.supportsAsyncRefresh();
   auto renderGrayscalePass = [&]() {
     if (needsTextGrayscale) {
       page->render(renderer, fontId, orientedMarginLeft, orientedMarginTop);
@@ -1597,7 +1610,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     }
   };
 
-  renderer.setRenderMode(needsAnyGrayscale ? GfxRenderer::BW_GRAY_BASE : GfxRenderer::BW);
+  renderer.setRenderMode(needsGrayAwareBinaryBase ? GfxRenderer::BW_GRAY_BASE : GfxRenderer::BW);
   page->render(renderer, fontId, orientedMarginLeft, orientedMarginTop);
   renderer.setRenderMode(GfxRenderer::BW);
   renderStatusBar();
@@ -1612,7 +1625,12 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   // issued two or three FAST waveforms before gray refinement. A manual refresh
   // request still forces the normal cadence onto its full-clean mode.
   if (manualRefreshPending) pagesUntilFullRefresh = 1;
-  ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh, overlapRefresh);
+  if (stageCompleteGrayTarget) {
+    renderer.displayGrayscaleBase(ReaderUtils::refreshModeForCycle(pagesUntilFullRefresh));
+    ReaderUtils::advanceRefreshCycle(pagesUntilFullRefresh);
+  } else {
+    ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh, overlapRefresh);
+  }
   lastPageDisplayCommitted = true;
   // FAT metadata work takes about 20 ms. On ordinary async page turns, perform
   // it while the panel is already BUSY instead of delaying the gray waveform.
@@ -1793,11 +1811,10 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
       }
       if (!scratch) {
         LOG_ERR("ERS", "OOM: grayscale strip scratch (%d bytes); skipping AA this page", gwBytes * STRIP_ROWS);
-        if (overlapRefresh) {
-          // The BW refresh ran the shadow-free async path, so controller RAM's
-          // differential baseline was never rebuilt. Even with AA skipped it must
-          // be re-synced from the intact BW framebuffer, or the next differential
-          // update diffs against stale contents.
+        if (overlapRefresh || stageCompleteGrayTarget) {
+          // Either an async base was submitted, or Paper Mono has a staged B/W
+          // target which still must be committed. Use the intact framebuffer so
+          // the next differential update starts from a valid baseline.
           renderer.cleanupGrayscaleWithFrameBuffer();
         }
       } else {
