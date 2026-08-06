@@ -25,6 +25,18 @@ constexpr int kTitleFontId = UI_12_FONT_ID;     // Requested main title size: 12
 constexpr int kSubtitleFontId = SMALL_FONT_ID;  // Requested subtitle size: 8px
 constexpr int kGuideFontId = SMALL_FONT_ID;     // Closest available to requested 6px
 
+// U+4E2D, spelled in explicit UTF-8 bytes so the value cannot depend on the
+// compiler's execution charset. Used only to ask a font how tall it renders
+// Han: a Chinese string draws in the registered CJK fallback, which is a
+// taller face than the built-in UI fonts, so a row sized from the primary
+// font's advanceY stacks its two lines on top of each other.
+constexpr char kHanMetricProbe[] = "\xE4\xB8\xAD";
+
+// The probe when the UI language is written in Han, otherwise an empty string —
+// resolveTextFontId() short-circuits on that and returns the primary font, so
+// Latin layouts measure exactly as they always have.
+const char* hanMetricProbe() { return I18n::getInstance().usesCjkScript() ? kHanMetricProbe : ""; }
+
 void drawScrollBar(const GfxRenderer& renderer, Rect rect, int itemCount, int pageStartIndex, int pageItems) {
   if (itemCount <= 0 || pageItems <= 0 || itemCount <= pageItems) {
     return;
@@ -262,8 +274,10 @@ void RoundedRaffTheme::drawTextField(const GfxRenderer& renderer, Rect rect, con
 }
 
 int RoundedRaffTheme::getListRowStep(bool hasSubtitle) const {
-  const int rowHeight =
-      hasSubtitle ? RoundedRaffMetrics::values.listWithSubtitleRowHeight : RoundedRaffMetrics::values.listRowHeight;
+  // Through getMetrics() rather than RoundedRaffMetrics::values: the row heights
+  // carry a runtime adjustment for CJK UI languages and their taller fallback face.
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const int rowHeight = hasSubtitle ? metrics.listWithSubtitleRowHeight : metrics.listRowHeight;
   return rowHeight + kSelectableRowGap;
 }
 
@@ -281,14 +295,20 @@ void RoundedRaffTheme::drawList(const GfxRenderer& renderer, Rect rect, int item
   (void)highlightValue;
   (void)rowDimmed;
   const bool hasSubtitle = static_cast<bool>(rowSubtitle);
-  const int titleLineHeight = renderer.getLineHeight(kTitleFontId);
-  const int subtitleLineHeight = renderer.getLineHeight(kSubtitleFontId);
+  // Measured through the probe rather than getLineHeight(): this row height is
+  // computed once for the whole list, so it has to reflect the tallest face any
+  // row can actually resolve to, which in a Chinese UI is the CJK fallback.
+  const char* const probe = hanMetricProbe();
+  const int titleLineHeight = renderer.getLineHeightForText(kTitleFontId, probe);
+  const int subtitleLineHeight = renderer.getLineHeightForText(kSubtitleFontId, probe);
   constexpr int subtitleTopPadding = 10;
   constexpr int subtitleBottomPadding = 10;
   constexpr int subtitleInterLineGap = 4;
   const int subtitleRowHeight =
       subtitleTopPadding + titleLineHeight + subtitleInterLineGap + subtitleLineHeight + subtitleBottomPadding;
-  const int rowHeight = hasSubtitle ? subtitleRowHeight : RoundedRaffMetrics::values.listRowHeight;
+  // Single-line rows follow getListRowStep() (and so the tap hit-test); the
+  // subtitle variant keeps its measured two-line height.
+  const int rowHeight = hasSubtitle ? subtitleRowHeight : UITheme::getInstance().getMetrics().listRowHeight;
   const int rowStep = rowHeight + kSelectableRowGap;
   const int pageItems = std::max(1, rect.height / rowStep);
   const int pageStartIndex = std::max(0, selectedIndex / pageItems) * pageItems;

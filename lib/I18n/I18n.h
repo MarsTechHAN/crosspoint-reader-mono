@@ -21,6 +21,13 @@ class I18n {
   const char* operator[](StrId id) const { return get(id); }
 
   Language getLanguage() const { return _language; }
+  // True when the UI text of this language is written in Han/Kana/Hangul. Those
+  // strings draw through the CJK fallback faces, which are registered several
+  // points above their Latin counterpart and are correspondingly taller, so the
+  // UI has to reserve more vertical room per line. Extend when a translation in
+  // another CJK script is added.
+  static bool usesCjkScript(const Language lang) { return lang == Language::ZH_CN; }
+  bool usesCjkScript() const { return usesCjkScript(_language); }
   void setLanguage(Language lang);
   const char* getLanguageName(Language lang) const;
   static Language languageFromCode(const char* code);

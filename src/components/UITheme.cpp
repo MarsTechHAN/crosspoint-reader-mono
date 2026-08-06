@@ -3,6 +3,7 @@
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
 #include <HalGPIO.h>
+#include <I18n.h>
 #include <Logging.h>
 
 #include <algorithm>
@@ -53,16 +54,57 @@ void UITheme::setTheme(CrossPointSettings::UI_THEME type) {
   metricsValid = false;
 }
 
+// Owned by main.cpp, which has no header to declare it in (unlike the HAL
+// singletons). getMetrics() takes no renderer argument and is called from
+// everywhere, so the font measurement below has to reach the global directly.
+extern GfxRenderer renderer;
+
+// Pixels `fontId` grows by when it has to draw Han. Zero for a Latin UI
+// language, and zero for a font with no registered CJK fallback — in both cases
+// resolveTextFontId() hands back the primary face and the difference cancels.
+static int cjkLineHeightExtra(const int fontId) {
+  if (!I18N.usesCjkScript()) return 0;
+  // U+4E2D in explicit UTF-8 bytes, so the probe cannot depend on the
+  // compiler's execution charset. Any Han codepoint the fallback covers works.
+  static constexpr char kHanProbe[] = "\xE4\xB8\xAD";
+  return renderer.getLineHeightForText(fontId, kHanProbe) - renderer.getLineHeight(fontId);
+}
+
 const ThemeMetrics& UITheme::getMetrics() const {
   // hasTouch() can flip once touch init completes after static construction, so the
   // cached copy is refreshed when the flag differs instead of copying the struct per call.
   const bool touch = gpio.hasTouch();
-  if (!metricsValid || touch != metricsForTouch) {
+
+  // Han text draws through a fallback face registered CJK_UI_FALLBACK_STEP_PT
+  // points above its Latin counterpart (see setupDisplayAndFonts()), and
+  // drawText() places the baseline at y + that face's ascender, so rows sized
+  // from the Latin metrics let each line run into the one below. Measure the
+  // difference rather than assuming a constant: the step is in points, the
+  // themes rasterise at different sizes, and RoundedRaff titles a row in
+  // UI_12 where the others use UI_10.
+  //
+  // The measurement doubles as the cache key. Keying on the language alone
+  // would freeze whatever the fonts reported the first time getMetrics() ran,
+  // which on an early call is before the CJK fallback is registered at all.
+  const int titleExtra = cjkLineHeightExtra(currentMetrics->listTitleFontId);
+  const int subtitleExtra = cjkLineHeightExtra(currentMetrics->listSubtitleFontId);
+
+  if (!metricsValid || touch != metricsForTouch || titleExtra != metricsTitleExtra ||
+      subtitleExtra != metricsSubtitleExtra) {
     adjustedMetrics = *currentMetrics;
     if (touch || gpio.deviceIsPaperMono()) {
       adjustedMetrics.buttonHintsHeight = 0;
     }
+    // menuRowHeight is deliberately left alone: the home menu tiles are 45 px
+    // for a ~33 px CJK em, so they already fit, and drawButtonMenu() lays them
+    // out from the static metrics while HomeActivity hit-tests taps from these
+    // adjusted ones — bumping only one side would misroute every menu tap.
+    adjustedMetrics.listRowHeight += titleExtra;
+    adjustedMetrics.listWithSubtitleRowHeight += titleExtra + subtitleExtra;
+
     metricsForTouch = touch;
+    metricsTitleExtra = titleExtra;
+    metricsSubtitleExtra = subtitleExtra;
     metricsValid = true;
   }
   return adjustedMetrics;

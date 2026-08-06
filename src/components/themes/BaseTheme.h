@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "fontIds.h"
+
 class GfxRenderer;
 struct RecentBook;
 
@@ -22,6 +24,12 @@ struct TabInfo {
   const char* label;
   bool selected;
 };
+
+// Points by which every CJK UI fallback face sits above its Latin counterpart;
+// see setupDisplayAndFonts() for where the fallbacks are registered. The pixel
+// cost is deliberately *not* a constant here — UITheme::getMetrics() measures it
+// per font, because the themes title their rows in different faces.
+inline constexpr int CJK_UI_FALLBACK_STEP_PT = 2;
 
 struct ThemeMetrics {
   int batteryWidth;
@@ -99,6 +107,14 @@ struct ThemeMetrics {
   int textFieldNormalThickness;
   int textFieldCursorThickness;
   int textFieldLineEndOffset;
+
+  // The fonts this theme's drawList() renders a row's title and subtitle in.
+  // UITheme::getMetrics() measures them to size the two list row heights
+  // against the face that will actually draw: in a Chinese UI both resolve to
+  // the taller CJK fallback (see GfxRenderer::resolveTextFontId), and a row
+  // sized from the Latin advanceY runs the lines into each other.
+  int listTitleFontId;
+  int listSubtitleFontId;
 };
 
 enum UIIcon { None = 0, Folder, Text, Image, Book, File, Recent, Settings, Transfer, Library, Wifi, Hotspot, Bookmark };
@@ -170,7 +186,9 @@ constexpr ThemeMetrics values = {.batteryWidth = 15,
                                  .textFieldHorizontalPadding = 6,
                                  .textFieldNormalThickness = 1,
                                  .textFieldCursorThickness = 3,
-                                 .textFieldLineEndOffset = 0};
+                                 .textFieldLineEndOffset = 0,
+                                 .listTitleFontId = UI_10_FONT_ID,
+                                 .listSubtitleFontId = SMALL_FONT_ID};
 }
 
 class BaseTheme {

@@ -44,6 +44,12 @@ class UITheme {
   mutable ThemeMetrics adjustedMetrics;
   mutable bool metricsValid = false;
   mutable bool metricsForTouch = false;
+  // Extra line-height pixels the CJK fallback costs the list title/subtitle
+  // fonts. Cached alongside the metrics they adjusted, and compared against a
+  // fresh measurement on every call so the cache also self-invalidates when the
+  // fallback font finishes registering or the UI language changes.
+  mutable int metricsTitleExtra = 0;
+  mutable int metricsSubtitleExtra = 0;
 };
 
 // Helper macro to access current theme

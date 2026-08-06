@@ -22,16 +22,18 @@ void snapFontPointSizeTo(const uint8_t availablePointSize) {
 }
 
 // Built-in UI fonts and the optical CJK size used beside them. Han glyphs in
-// the available TrueType faces appear about 4 pt smaller than the bundled
-// Latin fonts, so UI fallback follows the same N+4 rule as the flash font.
+// the available TrueType faces appear about 4 pt smaller than the bundled Latin
+// fonts, and the UI faces are the smallest in the build, so their Han stroke
+// pitch lands below what the panel resolves cleanly at N+4. These follow the
+// flash font's N+6 UI rule; keep the two tables in step (see main.cpp).
 struct UiFontSize {
   int fontId;
   uint8_t cjkPointSize;
 };
 constexpr UiFontSize kUiFontSizes[] = {
-    {SMALL_FONT_ID, 12},
-    {UI_10_FONT_ID, 14},
-    {UI_12_FONT_ID, 16},
+    {SMALL_FONT_ID, 14},
+    {UI_10_FONT_ID, 16},
+    {UI_12_FONT_ID, 18},
 };
 
 }  // namespace

@@ -233,10 +233,17 @@ void enterDeepSleep(bool fromTimeout = false) {
   activityManager.goToSleep(fromTimeout);
 
 #if FREEINK_DEVICE_PAPERMONO
-  // Custom/cover sleep screens may stage their four-gray refinement. Unlike a
-  // reading page, the retained sleep image has no later quiet-window callback:
-  // complete it synchronously before display.deepSleep() cuts the EPD rail.
-  renderer.runDisplayMaintenance();
+  // No-op today, and deliberately kept as the hook for "flush any deferred
+  // panel work before deepSleep() cuts the EPD rail". No driver in the SDK
+  // overrides PanelDriver::runMaintenance()/hasPendingMaintenance(), so this
+  // currently costs one virtual call. It is safe only because SleepActivity
+  // commits its own gray sequence synchronously in onEnter(); do not add a
+  // deferred sleep-screen stage without implementing the hook. Locked because
+  // the render task is a second controller consumer.
+  {
+    RenderLock sleepFlushLock;
+    renderer.runDisplayMaintenance();
+  }
 #endif
 
   if (isQuickResumeSleep) {
@@ -298,10 +305,17 @@ void setupDisplayAndFonts(bool seamless = false) {
 
     // LXGW WenKai's Han em box appears optically smaller than the bundled
     // Latin faces at the same nominal point size. Route every built-in CJK
-    // fallback to N+4 pt; measurement and drawing resolve through this same ID.
-    renderer.setBuiltinFallbackFont(SMALL_FONT_ID, BUILTIN_CJK_12_FONT_ID);
-    renderer.setBuiltinFallbackFont(UI_10_FONT_ID, BUILTIN_CJK_14_FONT_ID);
-    renderer.setBuiltinFallbackFont(UI_12_FONT_ID, BUILTIN_CJK_16_FONT_ID);
+    // fallback above the Latin nominal size; measurement and drawing resolve
+    // through this same ID.
+    //
+    // The UI faces run at N+6 rather than the reader's N+4: a Han glyph packs
+    // far more strokes into the same box than a Latin letter, and the UI fonts
+    // are the smallest in the build (Ubuntu 10/12 pt, Noto Sans 8 pt), so the
+    // stroke pitch there lands below what this panel resolves cleanly. Reader
+    // body text keeps N+4 — it is already large and user-adjustable.
+    renderer.setBuiltinFallbackFont(SMALL_FONT_ID, BUILTIN_CJK_14_FONT_ID);
+    renderer.setBuiltinFallbackFont(UI_10_FONT_ID, BUILTIN_CJK_16_FONT_ID);
+    renderer.setBuiltinFallbackFont(UI_12_FONT_ID, BUILTIN_CJK_18_FONT_ID);
 #ifndef OMIT_FONTS
     renderer.setBuiltinFallbackFont(NOTOSERIF_12_FONT_ID, BUILTIN_CJK_16_FONT_ID);
     renderer.setBuiltinFallbackFont(NOTOSERIF_16_FONT_ID, BUILTIN_CJK_20_FONT_ID);
@@ -381,7 +395,12 @@ void setup() {
 
   HalSystem::checkPanic();
 
-  SETTINGS.loadFromFile();
+  // Not fatal — the struct initializers are a valid configuration — but a boot
+  // that silently reverts every setting is the exact symptom users report as
+  // "settings won't save", so make the load failure visible in the log.
+  if (!SETTINGS.loadFromFile()) {
+    LOG_INF("MAIN", "No stored settings loaded; using defaults");
+  }
 #if FREEINK_DEVICE_PAPERMONO
   freeink::Ssd1683GrayParams grayParams;
   grayParams.darkFrames = SETTINGS.grayDarkFrames;

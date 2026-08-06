@@ -296,7 +296,10 @@ void BaseTheme::drawSideButtonHints(const GfxRenderer& renderer, const char* top
 }
 
 int BaseTheme::getListRowStep(bool hasSubtitle) const {
-  int rowHeight = (hasSubtitle) ? BaseMetrics::values.listWithSubtitleRowHeight : BaseMetrics::values.listRowHeight;
+  // Through getMetrics() rather than BaseMetrics::values: the row heights carry a
+  // runtime adjustment for CJK UI languages, whose taller fallback face needs it.
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  int rowHeight = (hasSubtitle) ? metrics.listWithSubtitleRowHeight : metrics.listRowHeight;
   return rowHeight;
 }
 
@@ -312,8 +315,9 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
                          const std::function<UIIcon(int index)>& rowIcon,
                          const std::function<std::string(int index)>& rowValue, bool highlightValue,
                          const std::function<bool(int index)>& rowDimmed) const {
-  int rowHeight =
-      (rowSubtitle != nullptr) ? BaseMetrics::values.listWithSubtitleRowHeight : BaseMetrics::values.listRowHeight;
+  // Must match getListRowStep() exactly — MappedInputManager hit-tests taps with
+  // that, so a row height computed differently here would misroute every tap.
+  int rowHeight = getListRowStep(rowSubtitle != nullptr);
   int pageItems = rowHeight > 0 ? std::max(1, rect.height / rowHeight) : 1;
 
   const int totalPages = (itemCount + pageItems - 1) / pageItems;
@@ -374,7 +378,7 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
     // Apply checkerboard dither to create gray text effect for dimmed items
     if (rowDimmed && rowDimmed(i) && i != selectedIndex) {
       const int titleWidth = renderer.getTextWidth(font, item.c_str());
-      const int lineH = renderer.getLineHeight(font);
+      const int lineH = renderer.getLineHeightForText(font, item.c_str());
       const int tx = rect.x + BaseMetrics::values.contentSidePadding;
       for (int py = itemY; py < itemY + lineH; py++)
         for (int px = tx; px < tx + titleWidth; px++)
@@ -385,7 +389,12 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
       std::string subtitleText = rowSubtitle(i);
       if (!subtitleText.empty()) {
         auto subtitle = renderer.truncatedText(SMALL_FONT_ID, subtitleText.c_str(), rowTextWidth);
-        renderer.drawText(SMALL_FONT_ID, rect.x + BaseMetrics::values.contentSidePadding, itemY + 22, subtitle.c_str(),
+        // Stacked by the title's rendered line height, not a fixed 22 px: a Han
+        // title draws in the taller CJK fallback and the constant put the
+        // subtitle inside it. Latin titles resolve to UI_10 (advanceY 24), so
+        // this shifts them 2 px down and nothing else changes.
+        const int subtitleY = itemY + renderer.getLineHeightForText(font, item.c_str());
+        renderer.drawText(SMALL_FONT_ID, rect.x + BaseMetrics::values.contentSidePadding, subtitleY, subtitle.c_str(),
                           i != selectedIndex);
       }
     }

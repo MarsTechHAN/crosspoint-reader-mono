@@ -39,6 +39,9 @@ constexpr int maxListValueWidth = 200;
 constexpr int mainMenuIconSize = 32;
 constexpr int listIconSize = 24;
 constexpr int mainMenuColumns = 2;
+// Top inset of a list row's title. The subtitle stacks below it by the title's
+// measured line height, so this is the only vertical constant the pair needs.
+constexpr int listTitleTopPadding = 7;
 int coverWidth = 0;
 
 const uint8_t* iconForName(UIIcon icon, int size) {
@@ -229,7 +232,10 @@ bool LyraTheme::tabIndexFromPoint(const GfxRenderer& renderer, const Rect rect, 
 }
 
 int LyraTheme::getListRowStep(bool hasSubtitle) const {
-  int rowHeight = (hasSubtitle) ? LyraMetrics::values.listWithSubtitleRowHeight : LyraMetrics::values.listRowHeight;
+  // Through getMetrics() rather than LyraMetrics::values: the row heights carry a
+  // runtime adjustment for CJK UI languages, whose taller fallback face needs it.
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  int rowHeight = (hasSubtitle) ? metrics.listWithSubtitleRowHeight : metrics.listRowHeight;
   return rowHeight;
 }
 
@@ -245,8 +251,9 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
                          const std::function<UIIcon(int index)>& rowIcon,
                          const std::function<std::string(int index)>& rowValue, bool highlightValue,
                          const std::function<bool(int index)>& rowDimmed) const {
-  int rowHeight =
-      (rowSubtitle != nullptr) ? LyraMetrics::values.listWithSubtitleRowHeight : LyraMetrics::values.listRowHeight;
+  // Must match getListRowStep() exactly — MappedInputManager hit-tests taps with
+  // that, so a row height computed differently here would misroute every tap.
+  int rowHeight = getListRowStep(rowSubtitle != nullptr);
   int pageItems = rowHeight > 0 ? std::max(1, rect.height / rowHeight) : 1;
 
   const int totalPages = (itemCount + pageItems - 1) / pageItems;
@@ -301,13 +308,14 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
 
     auto itemName = rowTitle(i);
     auto item = renderer.truncatedText(UI_10_FONT_ID, itemName.c_str(), rowTextWidth);
-    renderer.drawText(UI_10_FONT_ID, textX, itemY + 7, item.c_str(), true);
+    const int titleY = itemY + listTitleTopPadding;
+    renderer.drawText(UI_10_FONT_ID, textX, titleY, item.c_str(), true);
 
     // Apply checkerboard dither to create gray text effect for dimmed items
     if (rowDimmed && rowDimmed(i) && i != selectedIndex) {
       const int titleWidth = renderer.getTextWidth(UI_10_FONT_ID, item.c_str());
-      const int lineH = renderer.getLineHeight(UI_10_FONT_ID);
-      for (int py = itemY + 7; py < itemY + 7 + lineH; py++)
+      const int lineH = renderer.getLineHeightForText(UI_10_FONT_ID, item.c_str());
+      for (int py = titleY; py < titleY + lineH; py++)
         for (int px = textX; px < textX + titleWidth; px++)
           if ((px + py) % 2 == 0) renderer.drawPixel(px, py, false);
     }
@@ -325,7 +333,13 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
       // Draw subtitle
       std::string subtitleText = rowSubtitle(i);
       auto subtitle = renderer.truncatedText(SMALL_FONT_ID, subtitleText.c_str(), rowTextWidth);
-      renderer.drawText(SMALL_FONT_ID, textX, itemY + 30, subtitle.c_str(), true);
+      // Stacked below the title by the title's *rendered* line height rather
+      // than a fixed 30 px. A Han title draws in the taller CJK fallback face,
+      // and the old constant left it overlapping the subtitle by ~5 px in
+      // Chinese. Latin titles resolve to UI_10 (advanceY 24), so this lands at
+      // itemY + 31 — a pixel off the old layout and visually identical.
+      const int subtitleY = titleY + renderer.getLineHeightForText(UI_10_FONT_ID, item.c_str());
+      renderer.drawText(SMALL_FONT_ID, textX, subtitleY, subtitle.c_str(), true);
     }
 
     // Draw value

@@ -69,7 +69,9 @@ constexpr ThemeMetrics values = {.batteryWidth = 16,
                                  .textFieldHorizontalPadding = 6,
                                  .textFieldNormalThickness = 1,
                                  .textFieldCursorThickness = 3,
-                                 .textFieldLineEndOffset = 0};
+                                 .textFieldLineEndOffset = 0,
+                                 .listTitleFontId = UI_10_FONT_ID,
+                                 .listSubtitleFontId = SMALL_FONT_ID};
 }
 
 class LyraTheme : public BaseTheme {
