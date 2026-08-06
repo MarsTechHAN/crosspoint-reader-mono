@@ -350,8 +350,10 @@ void XtcReaderActivity::renderPage() {
 #if FREEINK_DEVICE_PAPERMONO
     // Hold the binary precursor in host RAM until both selector planes arrive;
     // the SSD1677 driver then presents the complete three-level target once.
+    // Stages the target only; the activation happens at displayGrayBuffer()
+    // below, past three abort checks that can return first. The countdown is
+    // charged there instead, so a superseded page turn does not eat a deghost.
     renderer.displayGrayscaleBase(ReaderUtils::refreshModeForCycle(pagesUntilFullRefresh));
-    ReaderUtils::advanceRefreshCycle(pagesUntilFullRefresh);
 #else
     if (pagesUntilFullRefresh <= 1) {
       // Periodic ghost cleanup: scrub via the normal path, then run the
@@ -424,6 +426,10 @@ void XtcReaderActivity::renderPage() {
 
     // Display grayscale overlay
     renderer.displayGrayBuffer();
+#if FREEINK_DEVICE_PAPERMONO
+    // The #else cadence above already settled itself at its own refresh.
+    if (renderer.displayCommitted()) ReaderUtils::advanceRefreshCycle(pagesUntilFullRefresh);
+#endif
 
     // Pass 4: Re-render BW to framebuffer (restore for next frame, instead of restoreBwBuffer)
     restoreBwFrame();

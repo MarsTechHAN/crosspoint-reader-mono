@@ -1566,8 +1566,11 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   }
 
   const bool pageHasImages = page->hasImages();
+  // Not cleared here: the request is only spent once a page actually reaches
+  // the panel (see RefreshCycleGuard below). handleForcedRefresh() sets it
+  // under RenderLock, which this render also holds, so no new request can slip
+  // in between the read and the guard's clear.
   const bool manualRefreshPending = forcedRefreshPending;
-  forcedRefreshPending = false;
   const bool balancedRefresh = ReaderUtils::useBalancedReaderRefresh();
   const bool needsTextGrayscale = balancedRefresh && SETTINGS.textAntiAliasing;
   const bool needsAnyGrayscale = balancedRefresh && (needsTextGrayscale || pageHasImages);
@@ -1626,11 +1629,30 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   // request still forces the normal cadence onto its full-clean mode.
   if (manualRefreshPending) pagesUntilFullRefresh = 1;
   if (stageCompleteGrayTarget) {
+    // Stages the target only; the activation happens at displayGrayBuffer()
+    // further down, past a dozen abort checks that can return first.
     renderer.displayGrayscaleBase(ReaderUtils::refreshModeForCycle(pagesUntilFullRefresh));
-    ReaderUtils::advanceRefreshCycle(pagesUntilFullRefresh);
   } else {
     ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh, overlapRefresh);
   }
+  // The ghost-cleanup countdown and the user's explicit refresh request are
+  // spent by a page reaching the panel, not by submitting one. Settle both on
+  // every exit path below from what the driver reports it actually did, so a
+  // superseded page turn does not silently eat a deghost or a forced refresh.
+  // Panels that paint synchronously always report committed.
+  struct RefreshCycleGuard {
+    const GfxRenderer& renderer;
+    int& pagesUntilFullRefresh;
+    bool& forcedRefreshPending;
+    bool manualRefreshPending;
+    bool advanceCycle;  // false when displayWithRefreshCycle() already settled it
+    ~RefreshCycleGuard() {
+      if (!renderer.displayCommitted()) return;
+      if (advanceCycle) ReaderUtils::advanceRefreshCycle(pagesUntilFullRefresh);
+      if (manualRefreshPending) forcedRefreshPending = false;
+    }
+  } refreshCycleGuard{renderer, pagesUntilFullRefresh, forcedRefreshPending, manualRefreshPending,
+                      stageCompleteGrayTarget};
   lastPageDisplayCommitted = true;
   // FAT metadata work takes about 20 ms. On ordinary async page turns, perform
   // it while the panel is already BUSY instead of delaying the gray waveform.

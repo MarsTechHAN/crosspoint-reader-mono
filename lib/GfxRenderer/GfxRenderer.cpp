@@ -21,6 +21,26 @@ namespace {
 uint8_t resolveSdCardStyle(const SdCardFont& font, const EpdFontFamily::Style style) {
   return font.resolveStyle(static_cast<uint8_t>(style));
 }
+
+// Coverage thresholds that quantise an 8-bit antialiased glyph bitmap into the
+// renderer's four `raw` levels. Previously duplicated verbatim at every 8bpp
+// rasterisation site, where the two copies could silently drift apart.
+//
+// Worth knowing when tuning: levels 1 and 2 are optically identical on a
+// three-level panel. Both reach the glass as a gray pixel — level 1 sets only
+// the MSB plane, level 2 sets both, and Ssd1683Driver::runUpdate composes the
+// two as `_grayLsb[i] | _grayMsb[i]`, so the extra LSB bit changes nothing. The
+// only threshold that alters what the user sees is AA_BLACK, which decides how
+// much coverage a pixel needs before it renders as solid black rather than
+// gray. At 224 that is 87.9%, which thin Han strokes and hairline serifs rarely
+// reach — lower it to darken text, raise it to soften edges.
+constexpr uint8_t AA_GRAY_LOW = 32;   // below this the pixel stays background
+constexpr uint8_t AA_GRAY_HIGH = 128; // level 1 / level 2 split; no optical effect
+constexpr uint8_t AA_BLACK = 224;     // at or above this the pixel renders black
+
+constexpr uint8_t quantiseCoverage(const uint8_t alpha) {
+  return alpha < AA_GRAY_LOW ? 0 : alpha < AA_GRAY_HIGH ? 1 : alpha < AA_BLACK ? 2 : 3;
+}
 }  // namespace
 
 namespace {
@@ -363,7 +383,7 @@ static void renderCharScaled(const GfxRenderer& renderer, GfxRenderer::RenderMod
           }
         }
         const uint8_t alpha = static_cast<uint8_t>((coverage + samples / 2) / samples);
-        const uint8_t raw = alpha < 32 ? 0 : alpha < 128 ? 1 : alpha < 224 ? 2 : 3;
+        const uint8_t raw = quantiseCoverage(alpha);
         if ((renderMode == GfxRenderer::BW && raw >= 2) ||
             (renderMode == GfxRenderer::BW_GRAY_BASE && raw >= 2)) {
           renderer.drawPixel(baseX + dstX, baseY + dstY, pixelState);
@@ -507,7 +527,7 @@ static void renderCharImpl(const GfxRenderer& renderer, GfxRenderer::RenderMode 
           }
 
           const uint8_t alpha = bitmap[pixelPosition];
-          const uint8_t raw = alpha < 32 ? 0 : alpha < 128 ? 1 : alpha < 224 ? 2 : 3;
+          const uint8_t raw = quantiseCoverage(alpha);
           if ((renderMode == GfxRenderer::BW && raw >= 2) ||
               (renderMode == GfxRenderer::BW_GRAY_BASE && raw >= 2)) {
             renderer.drawPixel(screenX, screenY, pixelState);
@@ -1715,6 +1735,8 @@ void GfxRenderer::abortDisplayWork() const { display.abortPostRefresh(); }
 
 bool GfxRenderer::displayWorkAborted() const { return display.postRefreshAborted(); }
 
+bool GfxRenderer::displayCommitted() const { return display.displayCommitted(); }
+
 void GfxRenderer::runDisplayMaintenance() const { display.runMaintenance(); }
 
 bool GfxRenderer::hasPendingDisplayMaintenance() const { return display.hasPendingMaintenance(); }
@@ -2142,6 +2164,11 @@ int GfxRenderer::getLineHeight(const int fontId) const {
 
 int GfxRenderer::getLineHeight(const int fontId, const float compression) const {
   return static_cast<int>(getLineHeight(fontId) * compression + 0.5f);
+}
+
+int GfxRenderer::getLineHeightForText(const int fontId, const char* text,
+                                      const EpdFontFamily::Style style) const {
+  return getLineHeight(resolveTextFontId(fontId, text, style));
 }
 
 int GfxRenderer::getTextHeight(const int fontId) const {

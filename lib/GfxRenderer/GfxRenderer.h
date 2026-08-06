@@ -212,6 +212,11 @@ class GfxRenderer {
   void beginDisplayWork() const;
   void abortDisplayWork() const;
   bool displayWorkAborted() const;
+  // True when the display sequence just issued actually reached the panel.
+  // Gate anything a paint "spends" -- the ghost-cleanup countdown, a pending
+  // forced refresh -- on this, so a discarded frame does not consume it.
+  // Query after the whole sequence, not between base and grayscale halves.
+  bool displayCommitted() const;
   void runDisplayMaintenance() const;
   bool hasPendingDisplayMaintenance() const;
   void displayControllerIdle() const;
@@ -310,6 +315,17 @@ class GfxRenderer {
   int getFontAscenderSize(int fontId) const;
   int getLineHeight(int fontId) const;
   int getLineHeight(int fontId, float compression) const;
+  /// Line height of the face drawText() will actually use for \p text.
+  ///
+  /// A Han string is drawn entirely in the registered CJK fallback (see
+  /// resolveTextFontId), which is a taller face than the built-in UI fonts.
+  /// Any layout that stacks two lines — a list row's title over its subtitle,
+  /// say — must measure with this, not getLineHeight(fontId): the primary
+  /// font's advanceY under-reports the Han line by several pixels and the two
+  /// lines overlap. Latin text resolves to the primary font, so the returned
+  /// value is unchanged for non-CJK UI languages.
+  int getLineHeightForText(int fontId, const char* text,
+                           EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   std::string truncatedText(int fontId, const char* text, int maxWidth,
                             EpdFontFamily::Style style = EpdFontFamily::REGULAR) const;
   /// Word-wrap \p text into at most \p maxLines lines, each no wider than

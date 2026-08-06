@@ -149,7 +149,11 @@ inline void displayWithRefreshCycle(const GfxRenderer& renderer, int& pagesUntil
   } else {
     renderer.displayBuffer(mode);
   }
-  advanceRefreshCycle(pagesUntilFullRefresh);
+  // Only a frame that reached the panel spends the ghost-cleanup countdown.
+  // Panels that paint synchronously always report committed, so this is a
+  // no-op for them. Paper Mono legitimately discards a superseded target, and
+  // letting that consume the countdown skips a deghost the user never gets.
+  if (renderer.displayCommitted()) advanceRefreshCycle(pagesUntilFullRefresh);
 }
 
 // Grayscale anti-aliasing pass. Renders content twice (LSB + MSB) to build
@@ -193,7 +197,9 @@ void renderAntiAliased(GfxRenderer& renderer, int& pagesUntilFullRefresh, Render
   renderer.copyGrayscaleMsbBuffers();
 
   renderer.displayGrayBuffer();
-  advanceRefreshCycle(pagesUntilFullRefresh);
+  // Charge the countdown against the activation that just ran, not against the
+  // base call above: on Paper Mono that one only stages the target in host RAM.
+  if (renderer.displayCommitted()) advanceRefreshCycle(pagesUntilFullRefresh);
   renderer.setRenderMode(GfxRenderer::BW);
 
   renderer.restoreBwBuffer();

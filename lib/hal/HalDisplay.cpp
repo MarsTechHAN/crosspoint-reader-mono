@@ -93,6 +93,8 @@ void HalDisplay::abortPostRefresh() { einkDisplay.abortPostRefresh(); }
 
 bool HalDisplay::postRefreshAborted() const { return einkDisplay.postRefreshAborted(); }
 
+bool HalDisplay::displayCommitted() const { return einkDisplay.displayCommitted(); }
+
 void HalDisplay::runMaintenance() { einkDisplay.runMaintenance(); }
 
 bool HalDisplay::hasPendingMaintenance() const { return einkDisplay.hasPendingMaintenance(); }

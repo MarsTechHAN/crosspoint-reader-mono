@@ -25,6 +25,12 @@ namespace {
 // already queued while it runs invalidates the generation before maintenance.
 // Do not add a visible post-refresh delay before gray refinement or cleanup.
 constexpr uint32_t DISPLAY_MAINTENANCE_QUIET_MS = 0;
+
+// How long the controller stays powered after the queue drains. Deliberately
+// not fused with the quiet window above: that one gates waveforms the user can
+// see and must stay at zero, this one gates pure housekeeping and wants to
+// outlast the gap between two page turns.
+constexpr uint32_t CONTROLLER_POWER_OFF_IDLE_MS = 1500;
 }
 
 void ActivityManager::begin() {
@@ -54,6 +60,12 @@ void ActivityManager::renderTaskLoop() {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     while (true) {
       const uint32_t sequence = updateSequence.load();
+      // Sampled together with the queue so an input edge arriving while we wait
+      // for RenderLock is not silently absorbed below. requestUpdate() aborts
+      // before it bumps updateSequence, so an abort paired with a new frame is
+      // already covered by `sequence`; noteUserInteraction() deliberately does
+      // not bump updateSequence, and that is the case this closes.
+      const uint32_t interactionAtQueue = interactionSequence.load();
       unsigned long renderStarted = 0;
       unsigned long foregroundDone = 0;
       if (sequence != renderedSequence) {
@@ -64,6 +76,16 @@ void ActivityManager::renderTaskLoop() {
         // Acquire the lock before reading currentActivity to avoid a TOCTOU race
         // where the main task deletes the activity between the null-check and render().
         RenderLock lock;
+        // The wait above can be seconds (a screenshot runs two full refreshes).
+        // beginDisplayWork() snapshots _abortGeneration as its new baseline, so
+        // an abort raised during that wait would be erased and this render would
+        // run to completion -- a full 3-gray composition plus its activation --
+        // for input the user has already superseded. Drop back instead;
+        // renderedSequence is untouched and interactionAtQueue is re-sampled on
+        // the next pass, so the frame is retried, not lost.
+        if (interactionSequence.load() != interactionAtQueue) {
+          continue;  // RenderLock releases via RAII
+        }
         if (currentActivity) {
           HalPowerManager::Lock powerLock;
           // Bind cancellation before any CPU-side composition. An input edge
@@ -118,16 +140,9 @@ void ActivityManager::renderTaskLoop() {
       }
 
       if (!renderer.hasPendingDisplayMaintenance()) {
-        // This render task is the sole SPI/controller consumer. Recheck both
-        // generations before declaring the queue idle, then let Paper Mono
-        // shut down analog/clock domains retained across adjacent waveforms.
-        if (interactionSequence.load() != quietInteraction || updateSequence.load() != quietUpdate) {
-          continue;
-        }
-        {
-          HalPowerManager::Lock powerLock;
-          renderer.displayControllerIdle();
-        }
+        // Recheck both generations before declaring the queue idle, then let
+        // Paper Mono shut down analog/clock domains retained across adjacent
+        // waveforms.
         if (interactionSequence.load() != quietInteraction || updateSequence.load() != quietUpdate) {
           continue;
         }
@@ -135,16 +150,54 @@ void ActivityManager::renderTaskLoop() {
           LOG_DBG("ACT", "Render complete: seq=%lu foreground=%lums maintenance=0ms",
                   static_cast<unsigned long>(sequence), foregroundDone - renderStarted);
         }
+
+        // Unlike the maintenance waveforms above, nothing on screen depends on
+        // the power-off, so it waits for the reader to actually stop turning
+        // pages. It costs ~140 ms of BUSY under RenderLock, so a turn landing
+        // inside it blocks on the lock and then pays initController() to undo
+        // the shutdown -- ~180 ms added to precisely the turn the user
+        // experiences as the quick one. Both requestUpdate() and
+        // noteUserInteraction() notify this task, so the window collapses the
+        // instant there is work; the only cost to a device the user has put
+        // down is the controller's retained analog domains for another second
+        // and a half.
+        if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(CONTROLLER_POWER_OFF_IDLE_MS)) > 0) {
+          continue;
+        }
+        // hasPendingMaintenance() is re-read too: the main task also drives the
+        // panel under RenderLock (forced refresh, screenshots) and can queue a
+        // gray refinement during the window without bumping either sequence.
+        if (interactionSequence.load() != quietInteraction || updateSequence.load() != quietUpdate ||
+            userInputActive.load() || interactionDispatchPending.load() ||
+            renderer.hasPendingDisplayMaintenance()) {
+          continue;
+        }
+        {
+          // This task is NOT the sole controller consumer: the main task drives
+          // the panel under RenderLock for forced refresh (main.cpp) and
+          // screenshots. controllerIdle() spends ~140 ms powering off and then
+          // deep-sleeps the controller, so running it unlocked let the main task
+          // enter writePlane() concurrently -- two owners of the file-static
+          // BUSY semaphore and its shared CHANGE interrupt (EpdBus.cpp), of the
+          // single 16 KB ROTATE_CHUNK staging buffer, and of the SPI
+          // transaction. Take the same lock the foreground path uses. The
+          // earlier RenderLock is already released above, and RenderLock is
+          // non-recursive, so this cannot self-deadlock.
+          RenderLock idleLock;
+          HalPowerManager::Lock powerLock;
+          renderer.displayControllerIdle();
+        }
         break;
       }
 
-      // The render task is also the single controller-work consumer. Foreground
-      // updates always win above; while the controller is otherwise idle, drain
-      // exactly one low-priority maintenance waveform and then re-check both
-      // queues. No polling delay and no concurrent SPI owners are involved.
+      // Foreground updates always win above; while the controller is otherwise
+      // idle, drain exactly one low-priority maintenance waveform and then
+      // re-check both queues. RenderLock is required for the same reason as the
+      // idle power-off: the main task is a second controller consumer.
       const unsigned long maintenanceStarted = millis();
       displayControllerWorkActive.store(true);
       {
+        RenderLock maintenanceLock;
         HalPowerManager::Lock powerLock;
         renderer.runDisplayMaintenance();
       }

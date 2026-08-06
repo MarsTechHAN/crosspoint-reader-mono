@@ -147,8 +147,14 @@ Each driven class spends its own number of white frames so that its net
 ```text
 white: +15*16              -15*16       = 0
 gray:  +15*16  +5*24       -15*(16+8)   = 0
-black: +15*16  +15*32      -15*(32-16)  = 0
+black: -15*16  +15*32      -15*(32-16)  = 0
 ```
+
+The black class takes its kick on the opposite rail (`makeTriLut` assigns LUT
+entry 3 `VS_WHITE` for the whole kick group). Kicking a pixel that is about to
+be driven black *toward* black would saturate it before the drive phase starts
+and cost the tail its headroom, so the kick pushes it white first and the
++15 V drive that follows pays that back along with the class's white dose.
 
 `tGray` is quantized to a multiple of three because the gray class pays its
 weak-rail dose back at one third the rail voltage; a remainder would leave a

@@ -56,6 +56,10 @@ class HalDisplay {
   void beginDisplayWork();
   void abortPostRefresh();
   bool postRefreshAborted() const;
+  // True when the last display sequence actually reached the panel. Callers
+  // whose ghost-cleanup cadence or forced-refresh flag is consumed by a paint
+  // must gate that consumption on this, or a discarded frame eats it.
+  bool displayCommitted() const;
   void runMaintenance();
   bool hasPendingMaintenance() const;
   void controllerIdle();
