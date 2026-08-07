@@ -113,56 +113,78 @@ void HalPowerManager::startDeepSleep(HalGPIO& gpio) const {
 #endif
 }
 
-uint16_t HalPowerManager::getBatteryPercentage() const {
+void HalPowerManager::pollBattery() const {
   static const BatteryMonitor battery;
-  const bool checkedTelemetry = BoardConfig::ACTIVE.batteryGauge.gaugeAddr != 0 ||
-                                BoardConfig::isM5StackPaperColor() || BoardConfig::isPaperMono();
-  if (checkedTelemetry) {
-    const unsigned long now = millis();
-    if (_batteryLastPollMs != 0 && (now - _batteryLastPollMs) < BATTERY_POLL_MS) {
-      return _batteryCachedPercent;
-    }
 
-    _batteryLastPollMs = now;
-    if (BoardConfig::isM5StackPaperColor() || BoardConfig::isPaperMono()) {
-      const BatteryMonitor::Status status = battery.readStatus();
-      // Preserve the last valid state across a transient I2C failure. A real
-      // unplug is a successful PMIC sample with chargingKnown=true/false, while
-      // treating an unreadable sample as "not charging" makes the icon flicker.
-      if (status.chargingKnown) {
-        _batteryCachedChargingKnown = true;
-        _batteryCachedCharging = status.charging;
-      }
-      if (!status.percentageKnown) {
-        LOG_ERR("PWR", "M5PM1 battery telemetry unavailable; retaining %d%%", _batteryCachedPercent);
-        return _batteryCachedPercent;
-      }
+  const unsigned long now = millis();
+  if (_batteryLastPollMs != 0 && (now - _batteryLastPollMs) < BATTERY_POLL_MS) {
+    return;
+  }
+  _batteryLastPollMs = now;
+
+  // One transaction covers percentage, voltage and charging for every backend,
+  // so the three of them always describe the same instant.
+  const BatteryMonitor::Status status = battery.readStatus();
+
+  // Preserve the last valid state across a transient I2C failure. A real unplug
+  // is a successful PMIC sample with chargingKnown=true/false, while treating an
+  // unreadable sample as "not charging" makes the icon flicker.
+  if (status.chargingKnown) {
+    _batteryCachedChargingKnown = true;
+    _batteryCachedCharging = status.charging;
+  }
+
+  if (status.millivoltsKnown && status.millivolts > 0) {
+    // A raw ADC board samples a divided rail through the SoC's own SAR, which is
+    // noisy enough to walk across a notch boundary on its own, so it gets a
+    // low-pass first. Gauge and PMIC boards report an already-averaged figure.
+    const bool rawAdc = BoardConfig::ACTIVE.batteryGauge.gaugeAddr == 0 && !BoardConfig::isM5StackPaperColor() &&
+                        !BoardConfig::isPaperMono();
+    _batteryCachedMillivolts =
+        (!rawAdc || _batteryCachedMillivolts == 0)
+            ? status.millivolts
+            : static_cast<uint16_t>((_batteryCachedMillivolts * 3u + status.millivolts) / 4u);
+  }
+
+  if (BoardConfig::ACTIVE.batteryGauge.gaugeAddr != 0) {
+    // A fuel gauge coulomb-counts, so its state of charge is a better number
+    // than anything the discharge curve could reconstruct. Take it verbatim.
+    if (status.percentageKnown) {
       _batteryCachedPercent = status.percentage;
-      LOG_DBG("PWR", "M5PM1 battery: %u%% %umV ext=%d vin=%ldmV usb=%ldmV src=%d",
-              status.percentage, status.millivolts, status.externalPowerKnown ? status.externalPower : -1,
-              static_cast<long>(status.pm1VinMv), static_cast<long>(status.pm1VinOutMv), status.pm1PowerSource);
-    } else {
-      uint16_t percent = 0;
-      if (!battery.readPercentageChecked(percent)) {
-        return _batteryCachedPercent;
-      }
-      _batteryCachedPercent = percent;
+      _batteryCachedPercentValid = true;
     }
-    return _batteryCachedPercent;
+    return;
   }
 
-  // smooth the battery %.
-  if (_batteryCachedPercent == 0) {
-    _batteryCachedPercent = 10 * battery.readPercentage();
-  } else {
-    _batteryCachedPercent = (_batteryCachedPercent * 9 + battery.readPercentage() * 10) / 10;
+  if (_batteryCachedMillivolts == 0) {
+    LOG_ERR("PWR", "battery telemetry unavailable; retaining %d%%", _batteryCachedPercent);
+    return;
   }
-  return _batteryCachedPercent / 10;
+  // 0xFFFF tells the lookup there is no previous notch to hold, so the very
+  // first sample lands wherever the curve says instead of crawling up from 0%.
+  const uint16_t previous = _batteryCachedPercentValid ? static_cast<uint16_t>(_batteryCachedPercent) : 0xFFFF;
+  _batteryCachedPercent = BatteryMonitor::percentageFromMillivolts(_batteryCachedMillivolts, previous);
+  _batteryCachedPercentValid = true;
+
+  if (BoardConfig::isM5StackPaperColor() || BoardConfig::isPaperMono()) {
+    LOG_DBG("PWR", "M5PM1 battery: %u%% %umV ext=%d vin=%ldmV usb=%ldmV src=%d", _batteryCachedPercent,
+            _batteryCachedMillivolts, status.externalPowerKnown ? status.externalPower : -1,
+            static_cast<long>(status.pm1VinMv), static_cast<long>(status.pm1VinOutMv), status.pm1PowerSource);
+  }
+}
+
+uint16_t HalPowerManager::getBatteryPercentage() const {
+  pollBattery();
+  return _batteryCachedPercent;
+}
+
+uint16_t HalPowerManager::getBatteryMillivolts() const {
+  pollBattery();
+  return _batteryCachedMillivolts;
 }
 
 bool HalPowerManager::isCharging() const {
-  // Refreshes percentage and charging from one cached PMIC transaction.
-  getBatteryPercentage();
+  pollBattery();
   return _batteryCachedChargingKnown && _batteryCachedCharging;
 }
 

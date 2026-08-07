@@ -156,6 +156,11 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Hide battery percentage
   enum HIDE_BATTERY_PERCENTAGE { HIDE_NEVER = 0, HIDE_READER = 1, HIDE_ALWAYS = 2, HIDE_BATTERY_PERCENTAGE_COUNT };
 
+  // What the text next to the battery icon says. Voltage is the honest reading:
+  // percentage on a board without a fuel gauge is a lookup off a generic Li-ion
+  // curve, so it moves in 10% notches and can be a notch out under load.
+  enum BATTERY_READOUT { BATTERY_READOUT_PERCENT = 0, BATTERY_READOUT_VOLTAGE = 1, BATTERY_READOUT_COUNT };
+
   // Page turn button long press behavior
   enum LONG_PRESS_BUTTON_BEHAVIOR {
     OFF = 0,
@@ -259,6 +264,8 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t opdsFilenameFormat = 0;
   // Hide battery percentage
   uint8_t hideBatteryPercentage = HIDE_NEVER;
+  // Battery readout format (percentage or cell voltage)
+  uint8_t batteryReadout = BATTERY_READOUT_PERCENT;
   // Long-press page turn button behavior
   uint8_t longPressButtonBehavior = OFF;
   // Long-press Confirm function in EPUB reader (cycles through LONG_PRESS_MENU_FUNCTION values).

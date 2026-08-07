@@ -202,6 +202,16 @@ class BaseTheme {
   void drawBatteryRight(const GfxRenderer& renderer, Rect rect,
                         bool showPercentage = true) const;  // Right aligned (UI headers)
   virtual void fillBatteryIcon(const GfxRenderer& renderer, Rect rect, uint16_t percentage) const;
+
+  // The text drawn beside the battery icon, per SETTINGS.batteryReadout. Writes
+  // into `buf` and returns it, so callers keep it on the stack. Every site that
+  // measures or clears the readout must go through these two so the reserved
+  // width and the drawn string can never disagree.
+  static const char* batteryReadoutText(char* buf, size_t bufSize);
+  // Widest string batteryReadoutText() can produce, for layout and for clearing
+  // the previous draw (the digit count changes as the battery drains).
+  static const char* batteryReadoutWidestText();
+  static constexpr size_t BATTERY_READOUT_BUF = 8;  // "100%" / "4.20V" + slack
   virtual void drawButtonHints(GfxRenderer& renderer, const char* btn1, const char* btn2, const char* btn3,
                                const char* btn4) const;
   void drawPaperMonoButtonHints(GfxRenderer& renderer, const char* back, const char* confirm, const char* previous,

@@ -77,8 +77,8 @@ void RoundedRaffTheme::drawHeader(const GfxRenderer& renderer, Rect rect, const 
   // Reserve space for the widest possible percentage text to avoid title/battery overlap
   int batteryGroupLeftX = batteryIconX;
   if (showBatteryPercentage) {
-    // Clear a fixed-width area for the battery percentage to avoid ghosting when digit count changes (e.g. 100% -> 99%)
-    const int maxTextWidth = renderer.getTextWidth(SMALL_FONT_ID, "100%");
+    // Clear a fixed-width area for the battery readout to avoid ghosting when digit count changes (e.g. 100% -> 99%)
+    const int maxTextWidth = renderer.getTextWidth(SMALL_FONT_ID, batteryReadoutWidestText());
     batteryGroupLeftX -= maxTextWidth + batteryPercentSpacing;
 
     const int clearW = maxTextWidth + batteryPercentSpacing + RoundedRaffMetrics::values.batteryWidth;

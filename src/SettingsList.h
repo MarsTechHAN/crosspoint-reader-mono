@@ -226,6 +226,9 @@ inline const std::vector<SettingInfo>& getBaseSettingsList() {
         SettingInfo::Enum(StrId::STR_HIDE_BATTERY, &CrossPointSettings::hideBatteryPercentage,
                           {StrId::STR_NEVER, StrId::STR_IN_READER, StrId::STR_ALWAYS}, "hideBatteryPercentage",
                           StrId::STR_CAT_DISPLAY),
+        SettingInfo::Enum(StrId::STR_BATTERY_READOUT, &CrossPointSettings::batteryReadout,
+                          {StrId::STR_BATTERY_READOUT_PERCENT, StrId::STR_BATTERY_READOUT_VOLTAGE}, "batteryReadout",
+                          StrId::STR_CAT_DISPLAY),
         SettingInfo::Enum(
             StrId::STR_REFRESH_FREQ, &CrossPointSettings::refreshFrequency,
             {StrId::STR_PAGES_1, StrId::STR_PAGES_5, StrId::STR_PAGES_10, StrId::STR_PAGES_15, StrId::STR_PAGES_30},

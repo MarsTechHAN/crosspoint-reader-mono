@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 
 #include "I18n.h"
@@ -93,14 +94,30 @@ void BaseTheme::fillBatteryIcon(const GfxRenderer& renderer, Rect rect, uint16_t
   }
 }
 
+const char* BaseTheme::batteryReadoutText(char* buf, const size_t bufSize) {
+  if (SETTINGS.batteryReadout == CrossPointSettings::BATTERY_READOUT_VOLTAGE) {
+    const uint16_t mv = powerManager.getBatteryMillivolts();
+    // Two decimals: the third digit is below what any of the backends resolve.
+    snprintf(buf, bufSize, "%u.%02uV", mv / 1000u, (mv % 1000u) / 10u);
+  } else {
+    snprintf(buf, bufSize, "%u%%", powerManager.getBatteryPercentage());
+  }
+  return buf;
+}
+
+const char* BaseTheme::batteryReadoutWidestText() {
+  return SETTINGS.batteryReadout == CrossPointSettings::BATTERY_READOUT_VOLTAGE ? "4.20V" : "100%";
+}
+
 void BaseTheme::drawBatteryLeft(const GfxRenderer& renderer, Rect rect, const bool showPercentage) const {
-  // Left aligned: icon on left, percentage on right (reader mode)
+  // Left aligned: icon on left, readout on right (reader mode)
   const uint16_t percentage = powerManager.getBatteryPercentage();
   const int y = rect.y + 6;
 
   if (showPercentage) {
-    const auto percentageText = std::to_string(percentage) + "%";
-    renderer.drawText(SMALL_FONT_ID, rect.x + batteryPercentSpacing + rect.width, rect.y, percentageText.c_str());
+    char readout[BATTERY_READOUT_BUF];
+    renderer.drawText(SMALL_FONT_ID, rect.x + batteryPercentSpacing + rect.width, rect.y,
+                      batteryReadoutText(readout, sizeof(readout)));
   }
 
   const Rect iconRect{rect.x, y, rect.width, rect.height};
@@ -109,15 +126,16 @@ void BaseTheme::drawBatteryLeft(const GfxRenderer& renderer, Rect rect, const bo
 }
 
 void BaseTheme::drawBatteryRight(const GfxRenderer& renderer, Rect rect, const bool showPercentage) const {
-  // Right aligned: percentage on left, icon on right (UI headers)
+  // Right aligned: readout on left, icon on right (UI headers)
   // rect.x is already positioned for the icon (drawHeader calculated it)
   const uint16_t percentage = powerManager.getBatteryPercentage();
   const int y = rect.y + 6;
 
   if (showPercentage) {
-    const auto percentageText = std::to_string(percentage) + "%";
-    const int textWidth = renderer.getTextWidth(SMALL_FONT_ID, percentageText.c_str());
-    renderer.drawText(SMALL_FONT_ID, rect.x - textWidth - batteryPercentSpacing, rect.y, percentageText.c_str());
+    char readout[BATTERY_READOUT_BUF];
+    batteryReadoutText(readout, sizeof(readout));
+    const int textWidth = renderer.getTextWidth(SMALL_FONT_ID, readout);
+    renderer.drawText(SMALL_FONT_ID, rect.x - textWidth - batteryPercentSpacing, rect.y, readout);
   }
 
   const Rect iconRect{rect.x, y, rect.width, rect.height};
@@ -900,10 +918,10 @@ void BaseTheme::drawStatusBar(GfxRenderer& renderer, const float bookProgress, c
     int batteryWidth = metrics.batteryWidth;
 
     if (showBatteryPercentage) {
-      const uint16_t percentage = powerManager.getBatteryPercentage();
+      char readout[BATTERY_READOUT_BUF];
       // width of icon + spacing + text for layout purposes
       batteryWidth +=
-          batteryPercentSpacing + renderer.getTextWidth(SMALL_FONT_ID, (std::to_string(percentage) + "%").c_str());
+          batteryPercentSpacing + renderer.getTextWidth(SMALL_FONT_ID, batteryReadoutText(readout, sizeof(readout)));
     }
 
     leftClusterWidth += batteryWidth;
