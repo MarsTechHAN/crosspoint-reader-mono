@@ -35,3 +35,6 @@ sdkconfig.sticky
 /sdkconfig.paper_mono
 # Packaged firmware images and bundled SD-card fonts.
 /dist
+# Waveform-editor bake export (tools/waveform-editor.html): compiled-in default
+# waveform, per-device tuning — never committed.
+PaperMonoWaveformBaked.h

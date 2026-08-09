@@ -1,0 +1,1514 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CrossPoint Waveform Studio · Paper Mono (SSD1677)</title>
+<style>
+/* ---------------------------------------------------------------- theme --- */
+:root {
+  color-scheme: dark;
+  --page:        #0d0d0d;
+  --surface:     #1a1a19;
+  --surface-2:   #222221;
+  --surface-3:   #2a2a28;
+  --ink:         #ffffff;
+  --ink-2:       #c3c2b7;
+  --ink-3:       #898781;
+  --grid:        #2c2c2a;
+  --baseline:    #383835;
+  --ring:        rgba(255,255,255,0.10);
+  /* rails: polarity encoding (diverging semantics), validated all-pairs dark */
+  --rail-vsh1:   #d55181;   /* +15 V strong, drives black */
+  --rail-vsh2:   #c98500;   /* +5 V weak, develops gray  */
+  --rail-vsl:    #3987e5;   /* -15 V strong, drives white */
+  --rail-vss:    #4a4a46;   /* 0 V hold — deliberately recessive */
+  /* lanes: categorical identity for the prediction chart, validated adjacent dark */
+  --lane-0:      #9085e9;   /* entry0 背景 */
+  --lane-1:      #d95926;   /* entry1 目标白 */
+  --lane-2:      #199e70;   /* entry2 目标灰 */
+  --lane-3:      #e66767;   /* entry3 目标黑 */
+  --good:        #0ca30c;
+  --warning:     #fab219;
+  --critical:    #d03b3b;
+  --accent:      #3987e5;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--page);
+  color: var(--ink-2);
+  font: 13px/1.5 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  display: flex; flex-direction: column;
+}
+h1, h2, h3 { color: var(--ink); font-weight: 600; margin: 0; }
+button {
+  font: inherit; color: var(--ink-2); background: var(--surface-2);
+  border: 1px solid var(--ring); border-radius: 7px; padding: 5px 11px;
+  cursor: pointer; transition: background .12s, color .12s, border-color .12s;
+}
+button:hover { background: var(--surface-3); color: var(--ink); }
+button:disabled { opacity: .38; cursor: default; }
+button.primary { background: var(--accent); border-color: transparent; color: #fff; }
+button.primary:hover { filter: brightness(1.12); }
+button.danger:hover { border-color: var(--critical); color: var(--critical); }
+button.on { border-color: var(--accent); color: var(--accent); background: rgba(57,135,229,.12); }
+input[type=text], input[type=number], select {
+  font: inherit; color: var(--ink); background: var(--surface);
+  border: 1px solid var(--ring); border-radius: 6px; padding: 4px 8px;
+}
+input[type=range] { accent-color: var(--accent); }
+.mono { font-family: var(--mono); }
+.chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  border: 1px solid var(--ring); border-radius: 999px;
+  padding: 2px 10px; font-size: 12px; white-space: nowrap;
+}
+.chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-3); }
+.chip.ok .dot { background: var(--good); }
+.chip.warn { color: var(--warning); border-color: rgba(250,178,25,.4); }
+.chip.err  { color: var(--critical); border-color: rgba(208,59,59,.4); }
+
+/* ------------------------------------------------------------- structure --- */
+header.app {
+  display: flex; align-items: center; gap: 14px;
+  padding: 10px 18px; background: var(--surface); border-bottom: 1px solid var(--ring);
+  flex-wrap: wrap;
+}
+header.app .logo { display: flex; align-items: baseline; gap: 9px; }
+header.app .logo em { color: var(--ink-3); font-style: normal; font-size: 12px; }
+header.app .spacer { flex: 1; }
+main {
+  flex: 1; display: grid; gap: 12px; padding: 12px 18px 20px;
+  grid-template-columns: minmax(640px, 1fr) 330px;
+  grid-template-areas: "pipeline pipeline" "editor side" "bottom side";
+  align-items: start;
+  max-width: 1680px; width: 100%; margin: 0 auto;
+}
+#pipeline { grid-area: pipeline; }
+#editor   { grid-area: editor; min-width: 0; }
+#side     { grid-area: side; display: flex; flex-direction: column; gap: 12px; }
+#bottom   { grid-area: bottom; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.card {
+  background: var(--surface); border: 1px solid var(--ring); border-radius: 12px;
+  padding: 12px 14px;
+}
+.card > h3 { font-size: 13px; letter-spacing: .02em; margin-bottom: 8px; }
+.card h3 .sub { color: var(--ink-3); font-weight: 400; font-size: 12px; margin-left: 6px; }
+
+/* --------------------------------------------------------------- pipeline --- */
+#pipeline .flow { display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap; }
+.stagecard {
+  flex: 1 1 150px; min-width: 150px; border: 1px solid var(--ring); border-radius: 10px;
+  padding: 8px 11px; cursor: pointer; background: var(--surface-2);
+  display: flex; flex-direction: column; gap: 3px; position: relative;
+}
+.stagecard:hover { border-color: var(--ink-3); }
+.stagecard.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.stagecard.off { opacity: .55; }
+.stagecard.fixed { cursor: default; background: transparent; border-style: dashed; }
+.stagecard .tag { font-size: 11px; color: var(--ink-3); }
+.stagecard .name { color: var(--ink); font-weight: 600; }
+.stagecard .meta { font-size: 11px; color: var(--ink-3); font-family: var(--mono); }
+.stagecard .togg { position: absolute; top: 7px; right: 8px; font-size: 11px; padding: 1px 7px; }
+.flowarrow { align-self: center; color: var(--ink-3); font-size: 15px; }
+#pipeline .note { margin-top: 8px; font-size: 12px; color: var(--ink-3); }
+
+/* ---------------------------------------------------------------- editor --- */
+#toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+#toolbar .group { display: flex; align-items: center; gap: 6px; }
+#toolbar .sep { width: 1px; height: 20px; background: var(--ring); }
+.brush {
+  display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px;
+  border-radius: 7px; border: 1px solid var(--ring); cursor: pointer; background: var(--surface-2);
+}
+.brush .sw { width: 12px; height: 12px; border-radius: 3px; }
+.brush.sel { border-color: var(--ink); color: var(--ink); }
+#seq { overflow-x: auto; border: 1px solid var(--ring); border-radius: 10px; background: var(--surface); }
+#seqInner { min-width: 100%; }
+#seq svg { display: block; }
+#warnbar { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+#warnbar .w { font-size: 12px; color: var(--warning); }
+#warnbar .w.err { color: var(--critical); }
+#warnbar .w.info { color: var(--ink-3); }
+
+/* ------------------------------------------------------------------ side --- */
+.kv { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 6px 10px; }
+.kv label { color: var(--ink-2); white-space: nowrap; }
+.kv .val { font-family: var(--mono); color: var(--ink); text-align: right; min-width: 68px; }
+.kv input[type=range] { width: 100%; }
+.railrow { display: grid; grid-template-columns: 86px 64px 1fr; gap: 8px; align-items: center; margin: 3px 0; }
+.railrow .anchor { color: var(--ink-3); font-size: 11px; font-family: var(--mono); }
+.railrow input { width: 100%; font-family: var(--mono); }
+.btnrow { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 6px; }
+.btnrow button { flex: 0 0 auto; }
+#deviceStatus { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+
+/* ---------------------------------------------------------------- bottom --- */
+#simwrap { position: relative; }
+#sim { width: 100%; height: 210px; display: block; }
+#simTip {
+  position: absolute; pointer-events: none; display: none; z-index: 5;
+  background: var(--surface-3); border: 1px solid var(--ring); border-radius: 8px;
+  padding: 7px 10px; font-size: 12px; box-shadow: 0 6px 20px rgba(0,0,0,.5); white-space: nowrap;
+}
+#simTip b { color: var(--ink); font-weight: 600; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; margin-top: 6px; }
+.legend .it { display: inline-flex; align-items: center; gap: 6px; }
+.legend .sw { width: 14px; height: 3px; border-radius: 2px; }
+.legend .sw.dash { background: repeating-linear-gradient(90deg, currentColor 0 3px, transparent 3px 6px); height: 2px; }
+#measure { font-family: var(--mono); font-size: 12px; color: var(--ink-2); display: flex; gap: 18px; flex-wrap: wrap; }
+#measure b { color: var(--ink); }
+#console {
+  font-family: var(--mono); font-size: 11px; line-height: 1.45;
+  background: var(--page); border: 1px solid var(--ring); border-radius: 8px;
+  height: 150px; overflow-y: auto; padding: 7px 10px; white-space: pre-wrap; word-break: break-all;
+}
+#console .tx { color: var(--accent); }
+#console .wv { color: var(--good); }
+#console .er { color: var(--critical); }
+dialog {
+  background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--ring);
+  border-radius: 12px; padding: 16px 18px; min-width: 300px;
+}
+dialog::backdrop { background: rgba(0,0,0,.55); }
+#toast {
+  position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%);
+  background: var(--surface-3); color: var(--ink); border: 1px solid var(--ring);
+  border-radius: 10px; padding: 9px 16px; display: none; z-index: 50; font-size: 13px;
+  box-shadow: 0 8px 30px rgba(0,0,0,.5);
+}
+#popover {
+  position: fixed; z-index: 40; display: none;
+  background: var(--surface-3); border: 1px solid var(--ring); border-radius: 10px;
+  padding: 10px 12px; box-shadow: 0 8px 30px rgba(0,0,0,.5);
+}
+#popover .kv { grid-template-columns: auto 64px; }
+#nosupport { margin: 10px 18px; padding: 10px 14px; border: 1px solid rgba(250,178,25,.4);
+  color: var(--warning); border-radius: 10px; display: none; }
+@media (max-width: 1120px) {
+  main { grid-template-columns: 1fr; grid-template-areas: "pipeline" "editor" "side" "bottom"; }
+}
+</style>
+</head>
+<body>
+
+<header class="app">
+  <div class="logo">
+    <h1>Waveform Studio</h1>
+    <em>CrossPoint · Paper Mono · SSD1677</em>
+  </div>
+  <span class="chip" id="connChip"><span class="dot"></span><span id="connText">未连接</span></span>
+  <span class="chip" id="modeChip" style="display:none"></span>
+  <span class="chip" id="maskChip" style="display:none"></span>
+  <div class="spacer"></div>
+  <button id="btnConnect" class="primary">连接设备</button>
+  <button id="btnPull" disabled>⭳ 读取设备波形</button>
+  <button id="btnRestore" class="danger" disabled title="CMD:WAVE OFF — 立即恢复固件默认行为">恢复默认 (OFF)</button>
+</header>
+
+<div id="nosupport">此页面需要桌面版 Chrome / Edge (Web Serial API)。用 Chrome 打开本文件即可,无需服务器。</div>
+
+<main>
+  <!-- =================================================== refresh pipeline -->
+  <section id="pipeline" class="card">
+    <h3>刷新管线 <span class="sub">Paper Mono 的真实刷新结构 — 点选卡片编辑对应 LUT;默认状态与出厂固件完全一致</span></h3>
+    <div class="flow">
+      <div class="stagecard fixed">
+        <span class="tag">UI / Fast 翻页</span>
+        <span class="name">面板 OTP 波形</span>
+        <span class="meta">面板内置 · 主机不可编辑</span>
+      </div>
+      <span class="flowarrow">‖</span>
+      <div class="stagecard sel" id="cardA" data-stage="A">
+        <span class="tag">Balanced 每次翻页 · Stage 1</span>
+        <span class="name">LUT A · 三灰激活</span>
+        <span class="meta" id="metaA">—</span>
+      </div>
+      <span class="flowarrow">→</span>
+      <div class="stagecard off" id="cardB" data-stage="B">
+        <span class="tag">可选 · Stage 2 (post-clean)</span>
+        <span class="name">LUT B · 第二段激活</span>
+        <span class="meta" id="metaB">出厂:关闭 (0 cycle)</span>
+        <button class="togg" id="togB">启用</button>
+      </div>
+      <span class="flowarrow">⟳</span>
+      <div class="stagecard off" id="cardC" data-stage="C">
+        <span class="tag">每 <span id="cadenceView">15</span> 页 / 手动 · Corrective 全刷</span>
+        <span class="name">LUT C · 全像素驱动</span>
+        <span class="meta" id="metaC">出厂:64f 全刷波形</span>
+        <button class="togg" id="togC">独立</button>
+      </div>
+    </div>
+    <div class="note">Ordinary 页:未变化白底走 entry 0(含 1+5 白偏置 top-up),变化像素与所有目标灰/黑像素按目标类走 entry 1/2/3。Corrective 页:全部像素按目标类驱动,使用 LUT C(未启用"独立"时即 LUT A)。Stage 2 一旦启用,每个 Balanced 页都会连跑两段激活。</div>
+  </section>
+
+  <!-- ============================================================ editor -->
+  <section id="editor" class="card">
+    <div id="toolbar">
+      <div class="group" id="brushes">
+        <span style="color:var(--ink-3)">画笔</span>
+        <button class="brush" data-vs="1"><span class="sw" style="background:var(--rail-vsh1)"></span>+15V 驱黑</button>
+        <button class="brush" data-vs="3"><span class="sw" style="background:var(--rail-vsh2)"></span>+5V 弱灰</button>
+        <button class="brush" data-vs="2"><span class="sw" style="background:var(--rail-vsl)"></span>−15V 驱白</button>
+        <button class="brush sel" data-vs="0"><span class="sw" style="background:var(--rail-vss); border:1px solid var(--ring)"></span>VSS 歇止</button>
+      </div>
+      <div class="sep"></div>
+      <div class="group">
+        <span style="color:var(--ink-3)">缩放</span>
+        <input type="range" id="zoom" min="4" max="18" value="9" step="1" style="width:90px">
+      </div>
+      <div class="sep"></div>
+      <button id="btnUndo" title="⌘/Ctrl+Z">↩ 撤销</button>
+      <button id="btnVcom" title="LUT4 (VCOM) 通道,出厂全 0 (DCVCOM)">VCOM 通道</button>
+      <div class="spacer" style="flex:1"></div>
+      <span class="mono" id="stageStat" style="color:var(--ink-3)"></span>
+    </div>
+    <div id="seq"><div id="seqInner"></div></div>
+    <div id="warnbar"></div>
+  </section>
+
+  <!-- ============================================================== side -->
+  <section id="side">
+    <div class="card">
+      <h3>参数模式 <span class="sub">按出厂算法重新生成 LUT A(与固件 makeTriLut 同构)</span></h3>
+      <div class="kv">
+        <label>激活 kick <span class="mono">preUp</span></label>
+        <input type="range" id="pPreUp" min="0" max="32" value="12"><span class="val" id="vPreUp">12f</span>
+        <label>弱轨灰发展 <span class="mono">tGray</span></label>
+        <input type="range" id="pTGray" min="6" max="60" step="3" value="24"><span class="val" id="vTGray">24f</span>
+        <label>强轨黑发展 <span class="mono">tBlack</span></label>
+        <input type="range" id="pTBlack" min="0" max="48" value="24"><span class="val" id="vTBlack">24f</span>
+      </div>
+      <div class="btnrow">
+        <button id="btnGenTri" class="primary">生成 → LUT A</button>
+        <button id="btnPresetStock" title="出厂翻页波形:preUp=12 tGray=24 tBlack=24,56 帧 / 280ms,entry0 全 VSS(黑字可保持),擦除类打包 +15×12 后双倍擦写 −15×24">出厂翻页 56f</button>
+        <button id="btnPresetCorrective" title="出厂全刷波形:preUp=16 tGray=24 tBlack=32,64 帧 / 320ms,不打包擦除。全刷驱动每一个像素,entry0 不会被选中">出厂全刷 64f → C</button>
+      </div>
+      <div class="note" style="font-size:12px;color:var(--ink-3);margin-top:6px">
+        每类白相位帧数自动配平:white=k · gray=k+tGray/3 · black=tBlack−k,单类净伏·帧恒为 0。
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>电压轨 &amp; 帧率 <span class="sub">随 LUT 每次下发</span></h3>
+      <div class="railrow"><label>VGH 栅高</label><input type="text" id="vVgh" maxlength="4"><span class="anchor">标定 0x17</span></div>
+      <div class="railrow"><label>VSH1 <b style="color:var(--rail-vsh1)">+15V</b></label><input type="text" id="vVsh1" maxlength="4"><span class="anchor">标定 0x41</span></div>
+      <div class="railrow"><label>VSH2 <b style="color:var(--rail-vsh2)">+5V</b></label><input type="text" id="vVsh2" maxlength="4"><span class="anchor">标定 0xA8</span></div>
+      <div class="railrow"><label>VSL <b style="color:var(--rail-vsl)">−15V</b></label><input type="text" id="vVsl" maxlength="4"><span class="anchor">标定 0x32</span></div>
+      <div class="railrow"><label>VCOM</label><input type="text" id="vVcom" maxlength="4"><span class="anchor">标定 0x30</span></div>
+      <div class="railrow"><label>帧率码 FR</label><input type="text" id="vFr" maxlength="4"><span class="anchor">0x08 = 5ms/帧 (标定)</span></div>
+      <div class="btnrow"><button id="btnRailsReset">恢复标定值</button></div>
+    </div>
+
+    <div class="card">
+      <h3>设备 <span class="sub">实时试奏</span></h3>
+      <div id="deviceStatus"></div>
+      <div class="btnrow">
+        <button id="btnApply" class="primary" disabled title="把当前三个 LUT 下发为运行时 override">♪ Apply 到设备</button>
+        <button id="btnLive" disabled title="每次修改后自动 Apply 并往返翻页试奏">● 连奏</button>
+      </div>
+      <div class="btnrow">
+        <button id="btnPrev" disabled>⏮ 上页</button>
+        <button id="btnNext" disabled>⏭ 下页</button>
+        <button id="btnTest" disabled title="CMD:WAVE TEST — 立即以 corrective 全刷当前画面">全刷测试</button>
+      </div>
+      <div class="kv" style="margin-top:8px">
+        <label>全刷节奏 (每 N 页)</label>
+        <select id="selCadence"><option>1</option><option>5</option><option>10</option><option selected>15</option><option>30</option></select>
+        <span class="val" style="min-width:0">RAM</span>
+      </div>
+      <div class="btnrow" style="margin-top:6px">
+        <button id="btnHold" disabled title="HOLD:两页重叠的黑像素留在 entry 0 不驱动 — 消除'字先消失再显示'。出厂默认已开启。仅当要试验 entry0 带电的 LUT(会漂白被保持的黑字)时才关闭。corrective 全刷不受影响,仍会重新锚定">◼ 保持未变黑字 (HOLD)</button>
+      </div>
+      <div class="btnrow" style="margin-top:8px">
+        <input type="text" id="sdName" placeholder="SD 波形名 (a-z0-9_-)" style="flex:1;min-width:110px">
+        <button id="btnSdSave" disabled title="保存 override 到 SD:/waveforms/<名>.wfm">存 SD</button>
+        <button id="btnSdLoad" disabled>读 SD</button>
+        <button id="btnSdBoot" disabled title="设为开机默认 (可用 BOOT OFF 撤销)">开机用</button>
+        <button id="btnSdList" disabled>列表</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>文件</h3>
+      <div class="btnrow">
+        <button id="btnJsonSave">导出 JSON</button>
+        <button id="btnJsonLoad">导入 JSON</button>
+        <button id="btnBake" title="导出 PaperMonoWaveformBaked.h — 放入 driver 目录编译一次即静态化">导出 .h (静态化)</button>
+      </div>
+      <div class="note" style="font-size:12px;color:var(--ink-3);margin-top:6px">
+        动态方案零开销:LUT 本就每次激活经 SPI 下发 111 字节,override 只是换了字节来源。静态化 .h 供固化为编译期默认。
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================================ bottom -->
+  <section id="bottom">
+    <div class="card">
+      <h3>光学响应预测 <span class="sub">一阶颗粒模型:±15V 约 10 帧满摆,+5V 约 60 帧 — 仅供直觉,以玻璃实测为准</span></h3>
+      <div id="simwrap">
+        <canvas id="sim"></canvas>
+        <div id="simTip"></div>
+      </div>
+      <div class="legend" id="simLegend"></div>
+    </div>
+    <div class="card">
+      <h3>实测 <span class="sub">解析设备日志 SSD1677 update 行</span></h3>
+      <div id="measure">尚无数据 — Apply 后翻一页即可看到实测帧数与耗时。</div>
+    </div>
+    <div class="card">
+      <h3>串口控制台</h3>
+      <div id="console"></div>
+    </div>
+  </section>
+</main>
+
+<div id="popover"></div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+/* =============================================================== constants */
+const RAIL_V   = [0, 15, -15, 5];             // VSS, VSH1, VSL, VSH2 (nominal volts)
+const RAIL_KEY = ["vss", "vsh1", "vsl", "vsh2"];
+const RAIL_LABEL = ["VSS 歇止", "VSH1 +15V 驱黑", "VSL −15V 驱白", "VSH2 +5V 弱灰"];
+const RAIL_COLOR = {
+  0: getCss("--rail-vss"), 1: getCss("--rail-vsh1"),
+  2: getCss("--rail-vsl"), 3: getCss("--rail-vsh2"),
+};
+const LANE_COLOR = [getCss("--lane-0"), getCss("--lane-1"), getCss("--lane-2"), getCss("--lane-3")];
+const LANE_NAME  = ["E0 背景·未变白", "E1 目标 白", "E2 目标 灰", "E3 目标 黑"];
+const CAL_VOLTS  = { vgh: 0x17, vsh1: 0x41, vsh2: 0xA8, vsl: 0x32, vcom: 0x30 };
+const FRAME_MS   = 5;                          // valid at FR code 0x08 only
+// measured on this glass: full optical swing ~10 frames strong rail, ~60 weak
+const RATE = { 1: +1/10, 2: -1/10, 3: +1/60, 0: 0 };
+
+function getCss(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+/* ============================================================== LUT model */
+// model: { vs:[5][10] byte, tp:[10][5] (A,B,C,D,RP), fr: code, volts:{vgh,vsh1,vsh2,vsl,vcom} }
+function blankModel(){
+  return {
+    vs: Array.from({length:5}, () => new Array(10).fill(0)),
+    tp: Array.from({length:10}, () => [0,0,0,0,0]),
+    fr: 0x08,
+    volts: { ...CAL_VOLTS },
+  };
+}
+function getVs(m, entry, group, phase){ return (m.vs[entry][group] >> ((3-phase)*2)) & 3; }
+function setVs(m, entry, group, phase, vs){
+  const shift = (3-phase)*2;
+  m.vs[entry][group] = (m.vs[entry][group] & ~(3<<shift)) | ((vs&3)<<shift);
+}
+function packLut(m){
+  const b = new Uint8Array(111);
+  for (let e=0;e<5;e++) for (let g=0;g<10;g++) b[e*10+g] = m.vs[e][g];
+  for (let g=0;g<10;g++) for (let i=0;i<5;i++) b[50+g*5+i] = m.tp[g][i];
+  const packed = (m.fr&0x0F) | ((m.fr&0x0F)<<4);
+  for (let i=0;i<5;i++) b[100+i] = packed;
+  b[105]=m.volts.vgh; b[106]=m.volts.vsh1; b[107]=m.volts.vsh2; b[108]=m.volts.vsl; b[109]=m.volts.vcom;
+  return b;
+}
+function unpackLut(bytes){
+  const m = blankModel();
+  for (let e=0;e<5;e++) for (let g=0;g<10;g++) m.vs[e][g] = bytes[e*10+g];
+  for (let g=0;g<10;g++) for (let i=0;i<5;i++) m.tp[g][i] = bytes[50+g*5+i];
+  m.fr = bytes[100] & 0x0F;
+  m.volts = { vgh:bytes[105], vsh1:bytes[106], vsh2:bytes[107], vsl:bytes[108], vcom:bytes[109] };
+  return m;
+}
+function lutFrames(m){
+  let f = 0;
+  for (let g=0;g<10;g++){
+    const t = m.tp[g];
+    f += (t[0]+t[1]+t[2]+t[3]) * (t[4]+1);
+  }
+  return f;
+}
+function toHex(bytes){ return [...bytes].map(x=>x.toString(16).padStart(2,"0").toUpperCase()).join(""); }
+function fromHex(s){
+  if (!/^[0-9a-fA-F]{222}$/.test(s)) return null;
+  const b = new Uint8Array(111);
+  for (let i=0;i<111;i++) b[i] = parseInt(s.slice(2*i, 2*i+2), 16);
+  return b;
+}
+
+/* =================================== faithful JS port of makeTriLut (C++) */
+// Ssd1683Driver::makeTriLut: idle entry 0, one kick group, then per-class
+// right-aligned trajectories; each driven class net V*frames == 0. The erase
+// class optionally packs a second kick-length dose toward black before a
+// double-length wipe (packedErase), which is the shipped page behaviour.
+const VS_BLACK = 1, VS_WHITE = 2, VS_WEAK = 3;
+function makeTriLutJS(preUp, tGray, tBlack, packedErase = true){
+  const m = blankModel();
+  const kick = preUp;
+  const whiteFor = [ kick, kick + Math.floor(tGray/3), tBlack > kick ? tBlack - kick : 0 ];
+  let group = 0;
+
+  if (kick > 0){
+    setVs(m, 1, group, 0, VS_BLACK);
+    setVs(m, 2, group, 0, VS_BLACK);
+    setVs(m, 3, group, 0, VS_WHITE);
+    m.tp[group] = [kick, 0, 0, 0, 0];
+    group++;
+  }
+
+  const trajectory = [ whiteFor[0], whiteFor[1] + tGray, whiteFor[2] + tBlack ];
+  const tail = Math.max(...trajectory);
+  const start = trajectory.map(t => tail - t);
+  const erasePack = (packedErase && tail >= 3*kick) ? kick : 0;
+  const eraseWipeStart = tail - whiteFor[0] - erasePack;
+  const erasePackStart = eraseWipeStart - erasePack;
+  const bounds = [0, erasePackStart, eraseWipeStart,
+                  start[1], start[1]+whiteFor[1], start[2], start[2]+whiteFor[2], tail]
+      .sort((a,b)=>a-b);
+  let previous = 0;
+  for (let i=0; i<8 && group<10; i++){
+    const current = bounds[i];
+    if (current <= previous) continue;
+    const length = current - previous;
+    if (previous >= eraseWipeStart) setVs(m, 1, group, 0, VS_WHITE);
+    else if (erasePack > 0 && previous >= erasePackStart) setVs(m, 1, group, 0, VS_BLACK);
+    if (previous >= start[1]){
+      const grayDevelop = start[1] + whiteFor[1];
+      setVs(m, 2, group, 0, previous < grayDevelop ? VS_WHITE : VS_WEAK);
+    }
+    if (previous >= start[2]){
+      const blackDevelop = start[2] + whiteFor[2];
+      setVs(m, 3, group, 0, previous < blackDevelop ? VS_WHITE : VS_BLACK);
+    }
+    m.tp[group] = [length, 0, 0, 0, 0];
+    previous = current;
+    group++;
+  }
+  return m;
+}
+// Ssd1683Driver::makePostCleanLut equivalent (lab stage-2 preset)
+function makePostCleanJS(cycles){
+  const m = blankModel();
+  const groups = Math.min(cycles, 10);
+  const total = 4*groups;
+  for (let g=0; g<groups; g++){
+    for (let p=0; p<4; p++){
+      const frame = 4*g+p;
+      const whiteVs = (frame & 1) === 0 ? VS_BLACK : VS_WHITE;
+      const grayVs  = (p===0 || p===3) ? VS_BLACK : VS_WHITE;
+      const blackVs = frame < total/2 ? VS_WHITE : VS_BLACK;
+      setVs(m,0,g,p,whiteVs); setVs(m,1,g,p,whiteVs);
+      setVs(m,2,g,p,grayVs);  setVs(m,3,g,p,blackVs);
+    }
+    m.tp[g] = [1,1,1,1,0];
+  }
+  return m;
+}
+
+/* ==================================================================  state */
+const state = {
+  stages: {
+    A: { model: makeTriLutJS(12,24,24),       enabled: true  },
+    B: { model: makePostCleanJS(6),           enabled: false },
+    C: { model: makeTriLutJS(16,24,32,false), enabled: false },
+  },
+  sel: "A",
+  brush: 0,
+  showVcom: false,
+  zoom: 9,
+  live: false,
+  liveFlip: false,
+  undo: [],
+  device: { connected:false, mode:null, cadence:15, activeMask:0, baked:false, dirty:true },
+};
+function curModel(){ return state.stages[state.sel].model; }
+function pushUndo(){
+  state.undo.push(JSON.stringify({stages: state.stages, sel: state.sel}));
+  if (state.undo.length > 60) state.undo.shift();
+}
+function popUndo(){
+  const s = state.undo.pop();
+  if (!s) return;
+  const parsed = JSON.parse(s);
+  state.stages = parsed.stages; state.sel = parsed.sel;
+  renderAll();
+}
+function markDirty(){
+  state.device.dirty = true;
+  if (state.live) liveApplySoon();
+}
+
+/* ================================================================ metrics */
+function laneImpulse(m, entry){
+  let sum = 0;
+  for (let g=0; g<10; g++){
+    const passes = m.tp[g][4] + 1;
+    for (let p=0; p<4; p++) sum += RAIL_V[getVs(m, entry, g, p)] * m.tp[g][p] * passes;
+  }
+  return sum;
+}
+// expand to per-frame rail sequence (repeats included) for one entry
+function frameSeq(m, entry){
+  const seq = [];
+  for (let g=0; g<10; g++){
+    const passes = m.tp[g][4] + 1;
+    for (let pass=0; pass<passes; pass++)
+      for (let p=0; p<4; p++){
+        const vs = getVs(m, entry, g, p);
+        for (let f=0; f<m.tp[g][p]; f++) seq.push(vs);
+      }
+  }
+  return seq;
+}
+function simulate(m, entry, p0){
+  const seq = frameSeq(m, entry);
+  const out = new Float32Array(seq.length + 1);
+  let p = p0;
+  out[0] = p;
+  for (let i=0; i<seq.length; i++){
+    p = Math.min(1, Math.max(0, p + RATE[seq[i]]));
+    out[i+1] = p;
+  }
+  return out;
+}
+
+/* ============================================================== sequencer */
+const SVG = "http://www.w3.org/2000/svg";
+const LANE_H = 64, RULER_H = 46, GAP = 10, LEFT = 168, PAD_R = 24;
+function el(tag, attrs, parent){
+  const n = document.createElementNS(SVG, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(n);
+  return n;
+}
+// layout of groups on the x axis (frames incl. repeats)
+function groupLayout(m){
+  const out = []; let x = 0;
+  for (let g=0; g<10; g++){
+    const per = m.tp[g][0]+m.tp[g][1]+m.tp[g][2]+m.tp[g][3];
+    const passes = m.tp[g][4]+1;
+    out.push({ g, start:x, per, passes, total: per*passes });
+    x += per*passes;
+  }
+  return { groups: out, total: x };
+}
+function railY(vs, laneTop){
+  // step positions inside a lane: +15 top, +5, 0, -15 bottom
+  const lvl = { 1: 0, 3: 1, 0: 2, 2: 3 }[vs];
+  return laneTop + 8 + lvl * ((LANE_H - 16) / 3);
+}
+function renderSeq(){
+  const m = curModel();
+  const holder = document.getElementById("seqInner");
+  holder.innerHTML = "";
+  const lay = groupLayout(m);
+  const fpx = state.zoom;
+  const totalFrames = Math.max(lay.total, 8);
+  const lanes = state.showVcom ? [0,1,2,3,4] : [0,1,2,3];
+  const width = LEFT + totalFrames * fpx + PAD_R + 40;
+  const height = RULER_H + lanes.length * (LANE_H + GAP) + 14;
+  const svg = el("svg", { width, height, viewBox: `0 0 ${width} ${height}` });
+  holder.appendChild(svg);
+
+  const X = f => LEFT + f * fpx;
+
+  /* ---- ruler: shared timing — the hardware's global TP/RP -------------- */
+  el("text", { x: 8, y: 17, fill: getCss("--ink-3"), "font-size": 11 }, svg)
+    .textContent = "节拍 (全 entry 共享)";
+  const frameStep = totalFrames > 120 ? 16 : 8;
+  for (let f=0; f<=totalFrames; f+=frameStep){
+    el("line", { x1:X(f), y1:RULER_H-6, x2:X(f), y2:height-12, stroke:getCss("--grid"), "stroke-width":1 }, svg);
+    el("text", { x:X(f)+2, y:height-3, fill:getCss("--ink-3"), "font-size":9.5, "font-family":"var(--mono)" }, svg)
+      .textContent = m.fr === 8 ? `${f*FRAME_MS}ms` : `${f}f`;
+  }
+  for (const gl of lay.groups){
+    if (gl.per === 0){
+      // zero-length group: a small stub so it stays reachable/editable
+      const gx = X(gl.start);
+      const stub = el("rect", { x: gx + 1, y: RULER_H-24, width: 7, height: 16, rx: 2,
+        fill: "none", stroke: getCss("--baseline"), "stroke-dasharray": "2 2", cursor: "pointer",
+        "data-edit-group": gl.g }, svg);
+      stub.addEventListener("click", ev => openGroupPopover(gl.g, ev));
+      continue;
+    }
+    let px = gl.start;
+    for (let pass=0; pass<gl.passes; pass++){
+      let fx = px;
+      for (let p=0; p<4; p++){
+        const len = m.tp[gl.g][p];
+        if (!len) continue;
+        const r = el("rect", { x:X(fx)+0.5, y:RULER_H-26, width:len*fpx-1, height:18, rx:3,
+          fill: pass===0 ? getCss("--surface-3") : "rgba(42,42,40,.45)",
+          stroke: getCss("--ring"), cursor:"pointer" }, svg);
+        r.addEventListener("click", ev => openGroupPopover(gl.g, ev));
+        el("title", {}, r).textContent =
+          `G${gl.g} 相位${"ABCD"[p]} · ${len} 帧` + (gl.passes>1?` · 第${pass+1}/${gl.passes}遍`:"") + " — 点击编辑";
+        if (pass===0){
+          const t = el("text", { x:X(fx)+len*fpx/2, y:RULER_H-13, fill:getCss("--ink-2"),
+            "font-size":9.5, "text-anchor":"middle", "font-family":"var(--mono)", "pointer-events":"none" }, svg);
+          t.textContent = len;
+        }
+        // drag handle on the phase's right edge (first pass only)
+        if (pass===0){
+          const h = el("rect", { x:X(fx+len)-3, y:RULER_H-27, width:6, height:20,
+            fill:"transparent", cursor:"ew-resize" }, svg);
+          attachTpDrag(h, gl.g, p);
+        }
+        fx += len;
+      }
+      px += gl.per;
+    }
+    // group label + repeat badge
+    const gx = X(gl.start);
+    el("text", { x:gx+2, y:RULER_H-31, fill:getCss("--ink-3"), "font-size":9.5, "font-family":"var(--mono)" }, svg)
+      .textContent = `G${gl.g}` + (gl.passes>1 ? ` ×${gl.passes}` : "");
+    if (gl.g>0)
+      el("line", { x1:gx, y1:RULER_H-30, x2:gx, y2:height-12, stroke:getCss("--baseline"), "stroke-width":1.5 }, svg);
+  }
+  // append-group affordance
+  const lastUsed = lay.groups.reduce((a,gl)=> gl.per>0 ? gl.g : a, -1);
+  if (lastUsed < 9){
+    const bx = X(totalFrames)+8;
+    const add = el("g", { cursor:"pointer" }, svg);
+    el("rect", { x:bx, y:RULER_H-26, width:24, height:18, rx:4, fill:"none", stroke:getCss("--ink-3"),
+      "stroke-dasharray":"3 2" }, add);
+    el("text", { x:bx+12, y:RULER_H-13, fill:getCss("--ink-3"), "font-size":12, "text-anchor":"middle" }, add)
+      .textContent = "+";
+    el("title", {}, add).textContent = "追加一个时序组";
+    add.addEventListener("click", ev => openGroupPopover(lastUsed+1, ev));
+  }
+
+  /* ---- lanes ----------------------------------------------------------- */
+  lanes.forEach((entry, li) => {
+    const top = RULER_H + li*(LANE_H+GAP);
+    el("rect", { x:0, y:top, width, height:LANE_H, fill:li%2 ? "rgba(255,255,255,.015)" : "none" }, svg);
+    const name = entry===4 ? "E4 VCOM (LUT4)" : LANE_NAME[entry];
+    el("text", { x:8, y:top+16, fill:getCss("--ink"), "font-size":11.5, "font-weight":600 }, svg).textContent = name;
+
+    if (entry < 4){
+      // DC balance readout
+      const imp = laneImpulse(m, entry);
+      const ok = imp === 0;
+      const col = ok ? getCss("--good") : getCss("--warning");
+      const t = el("text", { x:8, y:top+33, "font-size":10.5, fill:col, "font-family":"var(--mono)" }, svg);
+      t.textContent = `ΣV·f ${imp>0?"+":""}${imp}` + (ok ? " ✓" : " ⚠");
+      // predicted endpoint tone chips (from black / from white)
+      const sB = simulate(m, entry, 1), sW = simulate(m, entry, 0);
+      const toneB = sB[sB.length-1], toneW = sW[sW.length-1];
+      const chip = (x, tone, lbl) => {
+        const l = Math.round((1-tone)*255);
+        el("rect", { x, y:top+41, width:14, height:14, rx:3, fill:`rgb(${l},${l},${l})`,
+          stroke:getCss("--ring") }, svg);
+        el("title", {}, svg.lastChild).textContent = `${lbl} → L≈${Math.round((1-tone)*100)}%`;
+      };
+      chip(8,  toneB, "自黑起步");
+      chip(26, toneW, "自白起步");
+    } else {
+      el("text", { x:8, y:top+33, "font-size":10, fill:getCss("--ink-3") }, svg).textContent = "出厂全 0 = DCVCOM";
+    }
+
+    // rail guide lines
+    for (const vs of [1,3,0,2]){
+      const y = railY(vs, top);
+      el("line", { x1:LEFT, y1:y, x2:X(totalFrames), y2:y, stroke:getCss("--grid"), "stroke-width":.5 }, svg);
+    }
+    // blocks: step plot per group/phase (+ ghosted repeats)
+    for (const gl of lay.groups){
+      if (gl.per === 0) continue;
+      let px = gl.start;
+      for (let pass=0; pass<gl.passes; pass++){
+        let fx = px;
+        for (let p=0; p<4; p++){
+          const len = m.tp[gl.g][p];
+          if (!len) continue;
+          const vs = getVs(m, entry, gl.g, p);
+          const y = railY(vs, top);
+          const r = el("rect", {
+            x:X(fx)+1, y:y-5, width:Math.max(len*fpx-2, 2), height:10, rx:3,
+            fill:RAIL_COLOR[vs], opacity: pass===0 ? (vs===0?0.55:0.95) : (vs===0?0.28:0.4),
+            cursor: pass===0 ? "pointer" : "default",
+          }, svg);
+          el("title", {}, r).textContent =
+            `${name} · G${gl.g}${"ABCD"[p]} · ${RAIL_LABEL[vs]} · ${len}帧` +
+            (gl.passes>1?` ×${gl.passes}`:"");
+          if (pass===0){
+            r.setAttribute("data-cell", `${entry}:${gl.g}:${p}`);
+          }
+          fx += len;
+        }
+        px += gl.per;
+      }
+    }
+    // paint capture surface (transparent, above guides, below nothing)
+    const cap = el("rect", { x:LEFT, y:top, width:X(totalFrames)-LEFT, height:LANE_H,
+      fill:"transparent", "data-lane":entry, cursor:"crosshair" }, svg);
+    attachPaint(cap, entry, lay, fpx);
+  });
+
+  document.getElementById("stageStat").textContent =
+    `LUT ${state.sel} · ${lay.total} 帧` + (m.fr===8 ? ` ≈ ${lay.total*FRAME_MS} ms` : ` (FR=0x${m.fr.toString(16)})`);
+  renderWarnings();
+}
+
+/* paint interaction: press/drag on a lane sets the brush rail per phase-cell */
+function cellAtX(lay, m, frame){
+  for (const gl of lay.groups){
+    if (gl.per === 0) continue;
+    if (frame < gl.start || frame >= gl.start + gl.total) continue;
+    let local = (frame - gl.start) % gl.per;   // repeats map back to the group
+    for (let p=0; p<4; p++){
+      if (local < m.tp[gl.g][p]) return { g: gl.g, p };
+      local -= m.tp[gl.g][p];
+    }
+  }
+  return null;
+}
+/* NOTE: painting/dragging re-renders the SVG, which destroys the element the
+   pointer went down on — so both gestures listen on `window` for their whole
+   lifetime instead of relying on pointer capture. Geometry stays valid:
+   painting never changes the layout, and the TP drag recomputes from the
+   gesture's absolute start position. */
+function attachPaint(cap, entry, lay, fpx){
+  cap.addEventListener("pointerdown", ev => {
+    if (ev.button !== 0 && ev.button !== 2) return;
+    ev.preventDefault();
+    const rectLeft = cap.ownerSVGElement.getBoundingClientRect().left;
+    const erase = ev.button === 2;
+    let painted = false;
+    const paintAt = e => {
+      const m = curModel();
+      const frame = Math.floor((e.clientX - rectLeft - LEFT) / fpx);
+      const cell = cellAtX(lay, m, frame);
+      if (!cell) return;
+      const target = erase ? 0 : state.brush;
+      if (getVs(m, entry, cell.g, cell.p) === target) return;
+      if (!painted){ pushUndo(); painted = true; }
+      setVs(m, entry, cell.g, cell.p, target);
+      markDirty();
+      renderSeq(); renderSim(); renderPipelineMeta();
+    };
+    const move = e => paintAt(e);
+    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    paintAt(ev);
+  });
+  cap.addEventListener("contextmenu", ev => ev.preventDefault());
+}
+/* TP drag: resize a phase on the shared ruler */
+function attachTpDrag(handle, g, p){
+  handle.addEventListener("pointerdown", ev => {
+    ev.stopPropagation();
+    ev.preventDefault();
+    const startX = ev.clientX, startTp = curModel().tp[g][p];
+    let dragged = false;
+    const move = e => {
+      const d = Math.round((e.clientX - startX) / state.zoom);
+      const nv = Math.min(255, Math.max(0, startTp + d));
+      if (nv !== curModel().tp[g][p]){
+        if (!dragged){ pushUndo(); dragged = true; }
+        curModel().tp[g][p] = nv;
+        markDirty();
+        renderSeq(); renderSim(); renderPipelineMeta();
+      }
+    };
+    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  });
+}
+/* numeric editing popover for a whole group (TP A-D + RP) */
+function openGroupPopover(g, ev){
+  const m = curModel();
+  const pop = document.getElementById("popover");
+  pop.innerHTML = `
+    <div style="margin-bottom:7px;color:var(--ink);font-weight:600">时序组 G${g}<span style="color:var(--ink-3);font-weight:400"> · 帧长 0–255</span></div>
+    <div class="kv">
+      ${["A","B","C","D"].map((n,i)=>`<label>相位 ${n}</label><input type="number" min="0" max="255" id="pp${i}" value="${m.tp[g][i]}">`).join("")}
+      <label>重复 ×(RP+1)</label><input type="number" min="1" max="256" id="pp4" value="${m.tp[g][4]+1}">
+    </div>
+    <div class="btnrow"><button id="ppOk" class="primary">确定</button><button id="ppZero">清零该组</button></div>`;
+  pop.style.display = "block";
+  const px = Math.min(ev.clientX, innerWidth - 240), py = Math.min(ev.clientY + 10, innerHeight - 260);
+  pop.style.left = px + "px"; pop.style.top = py + "px";
+  const commit = (zero) => {
+    pushUndo();
+    if (zero){ m.tp[g] = [0,0,0,0,0]; }
+    else {
+      for (let i=0;i<4;i++) m.tp[g][i] = Math.min(255, Math.max(0, +pop.querySelector("#pp"+i).value || 0));
+      m.tp[g][4] = Math.min(255, Math.max(0, (+pop.querySelector("#pp4").value || 1) - 1));
+    }
+    pop.style.display = "none";
+    markDirty();
+    renderAll();
+  };
+  pop.querySelector("#ppOk").onclick = () => commit(false);
+  pop.querySelector("#ppZero").onclick = () => commit(true);
+}
+document.addEventListener("pointerdown", ev => {
+  const pop = document.getElementById("popover");
+  if (pop.style.display === "block" && !pop.contains(ev.target)) pop.style.display = "none";
+}, true);
+
+/* =============================================================== warnings */
+function renderWarnings(){
+  const m = curModel();
+  const bar = document.getElementById("warnbar");
+  const w = [];
+  for (let e=1; e<4; e++){
+    const imp = laneImpulse(m, e);
+    if (imp !== 0)
+      w.push({cls:"", t:`⚠ ${LANE_NAME[e]} 净伏·帧 = ${imp>0?"+":""}${imp} ≠ 0 — 闭环转换会累积残余电荷,重复翻页后底色会漂移(见 paper-mono-waveform.md「DC balance must be per class」)。`});
+  }
+  const imp0 = laneImpulse(m, 0);
+  if (imp0 !== 0 && state.sel !== "C")
+    w.push({cls:"", t:`⚠ entry0 净伏·帧 = ${imp0>0?"+":""}${imp0} ≠ 0。翻页时 entry0 同时保持未变的白底和未变的黑字(HOLD 默认开启),任何净电荷都会漂白/加深本不该动的像素 — 出厂 LUT A 的 entry0 全 VSS。若确实要用带电的 entry0,先发 CMD:WAVE HOLD 0。`});
+  const v = m.volts;
+  if (v.vgh!==CAL_VOLTS.vgh || v.vsh1!==CAL_VOLTS.vsh1 || v.vsh2!==CAL_VOLTS.vsh2 || v.vsl!==CAL_VOLTS.vsl || v.vcom!==CAL_VOLTS.vcom)
+    w.push({cls:"", t:"⚠ 电压轨已偏离本片玻璃的标定值 — 所有帧数模型(10帧强摆/60帧弱摆)都在标定轨下测得。"});
+  if (m.fr !== 8)
+    w.push({cls:"info", t:"ⓘ 帧率码 ≠ 0x08:时长估算与光学模型不再适用,仅帧数准确。"});
+  const frames = lutFrames(m);
+  if (frames === 0 && state.sel !== "B")
+    w.push({cls:"err", t:"✕ 总帧数为 0 — 该 LUT 不会产生任何驱动。"});
+  if (frames > 200)
+    w.push({cls:"info", t:`ⓘ ${frames} 帧 ≈ ${frames*FRAME_MS} ms,远超出厂翻页 56 帧/280ms,翻页会明显变慢。`});
+  bar.innerHTML = w.map(x=>`<div class="w ${x.cls}">${x.t}</div>`).join("");
+}
+
+/* ============================================================= simulation */
+function renderSim(){
+  const m = curModel();
+  const cv = document.getElementById("sim");
+  const dpr = devicePixelRatio || 1;
+  const W = cv.clientWidth, H = 210;
+  cv.width = W*dpr; cv.height = H*dpr;
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,W,H);
+  const padL = 40, padR = 96, padT = 12, padB = 22;
+  const frames = Math.max(lutFrames(m), 1);
+  const xf = f => padL + (W-padL-padR) * f / frames;
+  const yTone = t => padT + (H-padT-padB) * t;   // t: 0=white(top) .. 1=black(bottom)
+
+  // grid + axis
+  ctx.strokeStyle = getCss("--grid"); ctx.lineWidth = 1;
+  ctx.fillStyle = getCss("--ink-3"); ctx.font = "10px " + getCss("--mono");
+  for (const t of [0, .5, 1]){
+    ctx.beginPath(); ctx.moveTo(padL, yTone(t)); ctx.lineTo(W-padR, yTone(t)); ctx.stroke();
+    ctx.fillText(t===0?"白":t===1?"黑":"50%", 12, yTone(t)+3.5);
+  }
+  const step = frames > 120 ? 32 : 16;
+  for (let f=0; f<=frames; f+=step){
+    ctx.beginPath(); ctx.moveTo(xf(f), padT); ctx.lineTo(xf(f), H-padB); ctx.stroke();
+    ctx.fillText(m.fr===8 ? `${f*FRAME_MS}ms` : `${f}f`, xf(f)+2, H-8);
+  }
+
+  cv._series = [];
+  for (let e=0; e<4; e++){
+    for (const [p0, dash] of [[1,false],[0,true]]){
+      const s = simulate(m, e, p0);
+      cv._series.push({ entry:e, from:p0, data:s });
+      ctx.strokeStyle = LANE_COLOR[e];
+      ctx.lineWidth = 2;
+      ctx.setLineDash(dash ? [4,4] : []);
+      ctx.globalAlpha = dash ? .65 : 1;
+      ctx.beginPath();
+      for (let i=0; i<s.length; i++){
+        // s: 0=white..1=black maps straight onto the tone axis
+        if (i===0) ctx.moveTo(xf(0), yTone(s[0])); else ctx.lineTo(xf(i), yTone(s[i]));
+      }
+      ctx.stroke();
+      ctx.setLineDash([]); ctx.globalAlpha = 1;
+    }
+    // direct label at line end (solid trace)
+    const sEnd = cv._series[cv._series.length-2].data;
+    const endY = yTone(sEnd[sEnd.length-1]);
+    ctx.fillStyle = LANE_COLOR[e];
+    ctx.font = "11px system-ui";
+    ctx.fillText(LANE_NAME[e], W-padR+6, Math.min(H-padB-2, Math.max(padT+8, endY + (e-1.5)*4)) + 3);
+  }
+  cv._layout = { padL, padR, padT, padB, W, H, frames, xf, yTone };
+
+  const lg = document.getElementById("simLegend");
+  lg.innerHTML =
+    [0,1,2,3].map(e=>`<span class="it"><span class="sw" style="background:${LANE_COLOR[e]}"></span>${LANE_NAME[e]}</span>`).join("") +
+    `<span class="it" style="color:var(--ink-3)"><span class="sw" style="background:var(--ink-3)"></span>实线:自黑起步</span>` +
+    `<span class="it" style="color:var(--ink-3)"><span class="sw dash" style="color:var(--ink-3)"></span>虚线:自白起步</span>`;
+}
+/* hover crosshair + tooltip */
+(function(){
+  const cv = document.getElementById("sim");
+  const tip = document.getElementById("simTip");
+  cv.addEventListener("pointermove", ev => {
+    if (!cv._layout) return;
+    const r = cv.getBoundingClientRect();
+    const x = ev.clientX - r.left;
+    const L = cv._layout;
+    if (x < L.padL || x > L.W - L.padR){ tip.style.display = "none"; renderSim(); return; }
+    const f = Math.round((x - L.padL) / (L.W - L.padL - L.padR) * L.frames);
+    renderSim();
+    const ctx = cv.getContext("2d");
+    ctx.strokeStyle = getCss("--ink-3"); ctx.lineWidth = 1; ctx.setLineDash([3,3]);
+    ctx.beginPath(); ctx.moveTo(L.xf(f), L.padT); ctx.lineTo(L.xf(f), L.H - L.padB); ctx.stroke();
+    ctx.setLineDash([]);
+    const m = curModel();
+    const rows = [0,1,2,3].map(e => {
+      const s = cv._series.find(q => q.entry===e && q.from===1).data;
+      const tone = s[Math.min(f, s.length-1)];
+      const seq = frameSeq(m, e);
+      const rail = f>0 && f<=seq.length ? RAIL_LABEL[seq[f-1]].split(" ")[0] : "—";
+      return `<span style="color:${LANE_COLOR[e]}">●</span> ${LANE_NAME[e].slice(3)} <b>${Math.round((1-tone)*100)}%白</b> <span style="color:var(--ink-3)">${rail}</span>`;
+    });
+    tip.innerHTML = `<b>第 ${f} 帧${m.fr===8 ? " · "+(f*FRAME_MS)+"ms" : ""}</b><br>` + rows.join("<br>");
+    tip.style.display = "block";
+    tip.style.left = Math.min(x + 14, r.width - 210) + "px";
+    tip.style.top = "10px";
+  });
+  cv.addEventListener("pointerleave", () => { document.getElementById("simTip").style.display = "none"; renderSim(); });
+})();
+
+/* ============================================================== pipeline */
+function stageSummary(key){
+  const st = state.stages[key];
+  const f = lutFrames(st.model);
+  const ms = st.model.fr===8 ? ` / ${f*FRAME_MS}ms` : "";
+  return `${f} 帧${ms}`;
+}
+function renderPipelineMeta(){
+  document.getElementById("metaA").textContent = stageSummary("A");
+  document.getElementById("metaB").textContent = state.stages.B.enabled
+    ? stageSummary("B") + " · 每页追加" : "出厂:关闭 (0 cycle)";
+  document.getElementById("metaC").textContent = state.stages.C.enabled
+    ? stageSummary("C") + " · 独立 LUT" : "出厂:64f 全刷波形";
+  document.getElementById("cadenceView").textContent = state.device.cadence;
+  for (const k of ["A","B","C"]){
+    const card = document.getElementById("card"+k);
+    card.classList.toggle("sel", state.sel === k);
+    if (k !== "A") card.classList.toggle("off", !state.stages[k].enabled);
+  }
+  document.getElementById("togB").textContent = state.stages.B.enabled ? "停用" : "启用";
+  document.getElementById("togB").classList.toggle("on", state.stages.B.enabled);
+  document.getElementById("togC").textContent = state.stages.C.enabled ? "还原" : "独立";
+  document.getElementById("togC").classList.toggle("on", state.stages.C.enabled);
+}
+for (const k of ["A","B","C"]){
+  document.getElementById("card"+k).addEventListener("click", ev => {
+    if (ev.target.classList.contains("togg")) return;
+    state.sel = k;
+    renderAll();
+  });
+}
+document.getElementById("togB").addEventListener("click", () => {
+  pushUndo();
+  state.stages.B.enabled = !state.stages.B.enabled;
+  if (state.stages.B.enabled) state.sel = "B";
+  markDirty(); renderAll();
+});
+document.getElementById("togC").addEventListener("click", () => {
+  pushUndo();
+  const st = state.stages.C;
+  st.enabled = !st.enabled;
+  if (st.enabled){
+    st.model = JSON.parse(JSON.stringify(state.stages.A.model));
+    state.sel = "C";
+  }
+  markDirty(); renderAll();
+});
+
+/* ================================================================= volts */
+const VOLT_IDS = { vVgh:"vgh", vVsh1:"vsh1", vVsh2:"vsh2", vVsl:"vsl", vVcom:"vcom" };
+function renderVolts(){
+  const m = curModel();
+  for (const id in VOLT_IDS)
+    document.getElementById(id).value = "0x" + m.volts[VOLT_IDS[id]].toString(16).toUpperCase().padStart(2,"0");
+  document.getElementById("vFr").value = "0x" + m.fr.toString(16).toUpperCase().padStart(2,"0");
+}
+for (const id in VOLT_IDS){
+  document.getElementById(id).addEventListener("change", ev => {
+    const v = parseInt(ev.target.value, 16);
+    if (Number.isNaN(v) || v < 0 || v > 255){ renderVolts(); return; }
+    pushUndo();
+    curModel().volts[VOLT_IDS[id]] = v;
+    markDirty(); renderVolts(); renderWarnings();
+  });
+}
+document.getElementById("vFr").addEventListener("change", ev => {
+  const v = parseInt(ev.target.value, 16);
+  if (Number.isNaN(v) || v < 0 || v > 15){ renderVolts(); return; }
+  pushUndo();
+  curModel().fr = v;
+  markDirty(); renderAll();
+});
+document.getElementById("btnRailsReset").addEventListener("click", () => {
+  pushUndo();
+  curModel().volts = { ...CAL_VOLTS };
+  curModel().fr = 0x08;
+  markDirty(); renderAll();
+});
+
+/* ============================================================ tri params */
+function syncTriLabels(){
+  document.getElementById("vPreUp").textContent  = document.getElementById("pPreUp").value + "f";
+  document.getElementById("vTGray").textContent  = document.getElementById("pTGray").value + "f";
+  document.getElementById("vTBlack").textContent = document.getElementById("pTBlack").value + "f";
+}
+for (const id of ["pPreUp","pTGray","pTBlack"])
+  document.getElementById(id).addEventListener("input", syncTriLabels);
+document.getElementById("btnGenTri").addEventListener("click", () => {
+  pushUndo();
+  const volts = { ...state.stages.A.model.volts };
+  state.stages.A.model = makeTriLutJS(
+    +document.getElementById("pPreUp").value,
+    +document.getElementById("pTGray").value,
+    +document.getElementById("pTBlack").value);
+  state.stages.A.model.volts = volts;
+  state.sel = "A";
+  markDirty(); renderAll();
+  toast("已按参数重新生成 LUT A");
+});
+document.getElementById("btnPresetStock").addEventListener("click", () => {
+  pushUndo();
+  document.getElementById("pPreUp").value = 12;
+  document.getElementById("pTGray").value = 24;
+  document.getElementById("pTBlack").value = 24;
+  syncTriLabels();
+  state.stages.A.model = makeTriLutJS(12,24,24);
+  state.sel = "A";
+  markDirty(); renderAll();
+  toast("已载入出厂翻页波形 56f(entry0 全 VSS,擦除类打包双倍擦写)");
+});
+document.getElementById("btnPresetCorrective").addEventListener("click", () => {
+  pushUndo();
+  document.getElementById("pPreUp").value = 16;
+  document.getElementById("pTGray").value = 24;
+  document.getElementById("pTBlack").value = 32;
+  syncTriLabels();
+  state.stages.C.model = makeTriLutJS(16,24,32,false);
+  state.stages.C.enabled = true;
+  state.sel = "C";
+  markDirty(); renderAll();
+  toast("已载入出厂全刷波形 64f → LUT C");
+});
+
+/* ================================================================ serial */
+let port = null, writer = null, currentReader = null;
+const pending = [];   // { prefix, resolve, reject, timer }
+function logLine(text, cls){
+  const c = document.getElementById("console");
+  const div = document.createElement("div");
+  if (cls) div.className = cls;
+  div.textContent = text;
+  c.appendChild(div);
+  while (c.childNodes.length > 400) c.removeChild(c.firstChild);
+  c.scrollTop = c.scrollHeight;
+}
+async function connect(){
+  if (!navigator.serial){ document.getElementById("nosupport").style.display = "block"; return; }
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+  } catch(e){ toast("连接取消或失败:" + e.message); port = null; return; }
+  writer = port.writable.getWriter();
+  state.device.connected = true;
+  setConnUi(true);
+  readLoop();
+  // keep the device awake for the session, then sync status
+  await send("CMD:STAYAWAKE");
+  await waveCmd("STATUS").catch(()=>{});
+  toast("已连接 — 建议先「读取设备波形」作为起点");
+}
+async function disconnectCleanup(){
+  if (!port && !state.device.connected) return;
+  state.device.connected = false;
+  setConnUi(false);
+  const p = port;
+  port = null;
+  try { if (currentReader) await currentReader.cancel(); } catch(e){}
+  try { if (writer) writer.releaseLock(); } catch(e){}
+  writer = null;
+  try { if (p) await p.close(); } catch(e){}
+  for (const q of pending.splice(0)) { clearTimeout(q.timer); q.reject(new Error("已断开")); }
+}
+function setConnUi(on){
+  document.getElementById("connChip").classList.toggle("ok", on);
+  document.getElementById("connText").textContent = on ? "已连接 115200" : "未连接";
+  document.getElementById("btnConnect").textContent = on ? "断开" : "连接设备";
+  for (const id of ["btnPull","btnRestore","btnApply","btnLive","btnPrev","btnNext","btnTest",
+                    "btnHold","btnSdSave","btnSdLoad","btnSdBoot","btnSdList"])
+    document.getElementById(id).disabled = !on;
+  if (!on){
+    document.getElementById("modeChip").style.display = "none";
+    document.getElementById("maskChip").style.display = "none";
+  }
+}
+async function readLoop(){
+  const decoder = new TextDecoder();
+  let buf = "";
+  try {
+    while (port && port.readable){
+      currentReader = port.readable.getReader();
+      try {
+        while (true){
+          const { value, done } = await currentReader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let nl;
+          while ((nl = buf.indexOf("\n")) >= 0){
+            const line = buf.slice(0, nl).replace(/\r$/, "");
+            buf = buf.slice(nl+1);
+            handleLine(line);
+          }
+        }
+      } finally { currentReader.releaseLock(); currentReader = null; }
+    }
+  } catch(e){
+    logLine("!! 串口断开: " + e.message, "er");
+  }
+  disconnectCleanup();
+}
+function handleLine(line){
+  if (!line) return;
+  const isWave = line.startsWith("WAVE:");
+  logLine(line, isWave ? "wv" : undefined);
+  if (isWave){
+    const isErr = line.startsWith("WAVE:ERR");
+    for (let i=0; i<pending.length; i++){
+      if (isErr || line.startsWith(pending[i].prefix)){
+        const p = pending.splice(i,1)[0];
+        clearTimeout(p.timer);
+        if (isErr) p.reject(new Error(line.slice(5))); else p.resolve(line);
+        break;
+      }
+    }
+    if (line.startsWith("WAVE:STATUS")) parseStatus(line);
+    return;
+  }
+  // passive telemetry: the driver's per-activation log
+  let mm = line.match(/SSD1677 update: stages=(\d+) frames=(\d+)\+(\d+) .*gray=(\d+) full=(\d+) elapsed=(\d+)ms/);
+  if (mm){
+    document.getElementById("measure").innerHTML =
+      `<span>激活段数 <b>${mm[1]}</b></span><span>帧 <b>${mm[2]}${+mm[3]?("+"+mm[3]):""}</b></span>` +
+      `<span>灰度 <b>${mm[4]==="1"?"是":"否"}</b></span><span>corrective <b>${mm[5]==="1"?"是":"否"}</b></span>` +
+      `<span>耗时 <b>${mm[6]} ms</b></span>`;
+    return;
+  }
+  mm = line.match(/SSD1677 OTP B\/W: changed=(\d+) forced=(\d+) elapsed=(\d+)ms/);
+  if (mm){
+    document.getElementById("measure").innerHTML =
+      `<span>OTP B/W (UI/Fast — 自定义 LUT 不参与)</span><span>耗时 <b>${mm[3]} ms</b></span>`;
+  }
+}
+async function send(line){
+  if (!writer) throw new Error("未连接");
+  logLine("> " + (line.length > 90 ? line.slice(0, 90) + "…" : line), "tx");
+  await writer.write(new TextEncoder().encode(line + "\n"));
+}
+function waveCmd(args, prefix = "WAVE:", timeoutMs = 4000){
+  return new Promise(async (resolve, reject) => {
+    const p = { prefix, resolve, reject, timer: setTimeout(() => {
+      const i = pending.indexOf(p);
+      if (i >= 0) pending.splice(i,1);
+      reject(new Error("设备无响应: " + args));
+    }, timeoutMs) };
+    pending.push(p);
+    try { await send("CMD:WAVE " + args); } catch(e){ clearTimeout(p.timer); reject(e); }
+  });
+}
+function parseStatus(line){
+  const get = k => { const m = line.match(new RegExp(k + "=([\\w-]+)")); return m ? m[1] : null; };
+  state.device.mode = get("mode");
+  state.device.cadence = +get("cadence") || state.device.cadence;
+  state.device.activeMask = +get("active") || 0;
+  state.device.baked = get("baked") === "1";
+  state.device.hold = get("hold") === "1";
+  const hb = document.getElementById("btnHold");
+  hb.classList.toggle("on", state.device.hold);
+  hb.textContent = state.device.hold ? "◼ HOLD 生效中" : "◼ 保持未变黑字 (HOLD)";
+  const mc = document.getElementById("modeChip");
+  mc.style.display = "";
+  mc.textContent = "阅读器: " + (state.device.mode === "balanced" ? "Balanced ✓" : "Fast");
+  mc.className = "chip " + (state.device.mode === "balanced" ? "ok" : "warn");
+  if (state.device.mode !== "balanced")
+    mc.title = "Fast 模式走面板 OTP 波形,自定义 LUT 不参与 — 在设备阅读菜单切到 Balanced";
+  const kc = document.getElementById("maskChip");
+  kc.style.display = "";
+  const mask = state.device.activeMask;
+  kc.textContent = mask ? `override 生效: ${["A","B","C"].filter((_,i)=>mask&(1<<i)).join("+")}`
+                        : (state.device.baked ? "baked 默认生效" : "出厂波形");
+  kc.className = "chip" + (mask ? " ok" : "");
+  document.getElementById("selCadence").value = String(state.device.cadence);
+  renderPipelineMeta();
+  renderDeviceStatus();
+}
+function renderDeviceStatus(){
+  const d = document.getElementById("deviceStatus");
+  const bits = [];
+  if (state.device.connected){
+    bits.push(`<span class="chip ${state.device.dirty?"warn":"ok"}"><span class="dot"></span>${state.device.dirty?"有未下发的修改":"与设备一致"}</span>`);
+    if (state.device.baked) bits.push(`<span class="chip">固件含 baked 默认</span>`);
+  } else {
+    bits.push(`<span class="chip">未连接</span>`);
+  }
+  d.innerHTML = bits.join("");
+}
+
+/* --------- device actions --------- */
+async function applyAll(){
+  try {
+    await waveCmd("SET A " + toHex(packLut(state.stages.A.model)), "WAVE:");
+    if (state.stages.B.enabled)
+      await waveCmd("SET B " + toHex(packLut(state.stages.B.model)), "WAVE:");
+    else
+      await waveCmd("CLEAR B", "WAVE:");
+    if (state.stages.C.enabled)
+      await waveCmd("SET C " + toHex(packLut(state.stages.C.model)), "WAVE:");
+    else
+      await waveCmd("CLEAR C", "WAVE:");
+    state.device.dirty = false;
+    await waveCmd("STATUS").catch(()=>{});
+    toast("已下发 — 翻页即可体验新波形");
+  } catch(e){ toast("下发失败:" + e.message); }
+}
+document.getElementById("btnApply").addEventListener("click", applyAll);
+document.getElementById("btnRestore").addEventListener("click", async () => {
+  try {
+    await waveCmd("OFF");
+    state.live = false;
+    document.getElementById("btnLive").classList.remove("on");
+    await waveCmd("STATUS").catch(()=>{});
+    toast("已恢复固件默认行为");
+  } catch(e){ toast(e.message); }
+});
+document.getElementById("btnNext").addEventListener("click", () => send("CMD:NEXT").catch(()=>{}));
+document.getElementById("btnPrev").addEventListener("click", () => send("CMD:PREV").catch(()=>{}));
+document.getElementById("btnTest").addEventListener("click", async () => {
+  try { await waveCmd("TEST"); } catch(e){ toast(e.message); }
+});
+document.getElementById("btnHold").addEventListener("click", async () => {
+  try {
+    await waveCmd("HOLD " + (state.device.hold ? "0" : "1"));
+    await waveCmd("STATUS");
+    toast(state.device.hold ? "HOLD 已开启:未变黑字不再参与激励" : "HOLD 已关闭");
+  } catch(e){ toast(e.message); }
+});
+document.getElementById("selCadence").addEventListener("change", async ev => {
+  if (!state.device.connected) { state.device.cadence = +ev.target.value; renderPipelineMeta(); return; }
+  try { await waveCmd("CADENCE " + ev.target.value); state.device.cadence = +ev.target.value; renderPipelineMeta(); }
+  catch(e){ toast(e.message); }
+});
+/* live audition: debounce-apply then flip forward/back between two pages */
+let liveTimer = null;
+function liveApplySoon(){
+  if (!state.device.connected) return;
+  clearTimeout(liveTimer);
+  liveTimer = setTimeout(async () => {
+    await applyAll();
+    state.liveFlip = !state.liveFlip;
+    await send(state.liveFlip ? "CMD:NEXT" : "CMD:PREV").catch(()=>{});
+  }, 700);
+}
+document.getElementById("btnLive").addEventListener("click", ev => {
+  state.live = !state.live;
+  ev.currentTarget.classList.toggle("on", state.live);
+  if (state.live){ toast("连奏开启:每次修改自动下发并往返翻页"); liveApplySoon(); }
+});
+/* pull from device */
+document.getElementById("btnPull").addEventListener("click", async () => {
+  try {
+    const status = await waveCmd("STATUS");
+    const mask = (() => { const m = status.match(/active=(\d+)/); return m ? +m[1] : 0; })();
+    pushUndo();
+    for (const [slot, key] of [["A","A"],["B","B"],["C","C"]]){
+      const line = await waveCmd("GET " + slot, "WAVE:LUT:" + slot);
+      const mm = line.match(/^WAVE:LUT:[ABC]:(\w+):([0-9A-Fa-f]{222})$/);
+      if (!mm) continue;
+      const bytes = fromHex(mm[2]);
+      if (!bytes) continue;
+      state.stages[key].model = unpackLut(bytes);
+      if (key === "B") state.stages.B.enabled = (mask & 2) !== 0;
+      if (key === "C") state.stages.C.enabled = (mask & 4) !== 0;
+    }
+    state.device.dirty = false;
+    renderAll();
+    toast("已读取设备当前波形(含生成的出厂 LUT)");
+  } catch(e){ toast("读取失败:" + e.message); }
+});
+/* SD persistence */
+function sdName(){
+  const n = document.getElementById("sdName").value.trim();
+  if (!/^[A-Za-z0-9_-]{1,24}$/.test(n)){ toast("名字须为 1–24 位 a-z0-9_-"); return null; }
+  return n;
+}
+document.getElementById("btnSdSave").addEventListener("click", async () => {
+  const n = sdName(); if (!n) return;
+  if (state.device.dirty) await applyAll();
+  try { await waveCmd("SAVE " + n); toast(`已存 SD:/waveforms/${n}.wfm`); } catch(e){ toast(e.message); }
+});
+document.getElementById("btnSdLoad").addEventListener("click", async () => {
+  const n = sdName(); if (!n) return;
+  try {
+    await waveCmd("LOAD " + n);
+    document.getElementById("btnPull").click();
+  } catch(e){ toast(e.message); }
+});
+document.getElementById("btnSdBoot").addEventListener("click", async () => {
+  const n = sdName(); if (!n) return;
+  try { await waveCmd("BOOT " + n); toast(`开机将自动加载 ${n}(CMD:WAVE BOOT OFF 撤销)`); } catch(e){ toast(e.message); }
+});
+document.getElementById("btnSdList").addEventListener("click", async () => {
+  try { const l = await waveCmd("LIST", "WAVE:FILES"); toast(l.replace("WAVE:FILES", "SD 波形:") || "无"); }
+  catch(e){ toast(e.message); }
+});
+document.getElementById("btnConnect").addEventListener("click", () => {
+  if (state.device.connected) disconnectCleanup(); else connect();
+});
+
+/* ============================================================ file io */
+function projJson(){
+  return JSON.stringify({
+    format: "crosspoint-waveform", version: 1,
+    device: "paper-mono-ssd1677",
+    exported: new Date().toISOString(),
+    stages: {
+      A: { enabled: true, hex: toHex(packLut(state.stages.A.model)) },
+      B: { enabled: state.stages.B.enabled, hex: toHex(packLut(state.stages.B.model)) },
+      C: { enabled: state.stages.C.enabled, hex: toHex(packLut(state.stages.C.model)) },
+    },
+    cadence: state.device.cadence,
+  }, null, 2);
+}
+function download(name, text, type){
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type }));
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+document.getElementById("btnJsonSave").addEventListener("click", () => {
+  download("waveform.cpwave.json", projJson(), "application/json");
+});
+document.getElementById("btnJsonLoad").addEventListener("click", () => {
+  const inp = document.createElement("input");
+  inp.type = "file"; inp.accept = ".json,application/json";
+  inp.onchange = async () => {
+    try {
+      const obj = JSON.parse(await inp.files[0].text());
+      if (obj.format !== "crosspoint-waveform") throw new Error("不是本编辑器的 JSON");
+      pushUndo();
+      for (const k of ["A","B","C"]){
+        const st = obj.stages[k];
+        if (!st) continue;
+        const bytes = fromHex(st.hex);
+        if (!bytes) throw new Error("LUT " + k + " 数据损坏");
+        state.stages[k].model = unpackLut(bytes);
+        if (k !== "A") state.stages[k].enabled = !!st.enabled;
+      }
+      if (obj.cadence) state.device.cadence = obj.cadence;
+      markDirty(); renderAll();
+      toast("已导入 " + inp.files[0].name);
+    } catch(e){ toast("导入失败:" + e.message); }
+  };
+  inp.click();
+});
+function cArray(bytes){
+  let s = "";
+  for (let i=0; i<bytes.length; i++){
+    if (i % 12 === 0) s += "\n    ";
+    s += "0x" + bytes[i].toString(16).toUpperCase().padStart(2,"0") + (i<bytes.length-1?", ":"");
+  }
+  return s;
+}
+document.getElementById("btnBake").addEventListener("click", () => {
+  const A = packLut(state.stages.A.model);
+  let body = `// PaperMonoWaveformBaked.h — generated by tools/waveform-editor.html
+// ${new Date().toISOString()}
+//
+// 用法:把本文件放到
+//   freeink-sdk/libs/display/FreeInkDisplay/src/driver/PaperMonoWaveformBaked.h
+// 然后重新编译 (需 -DFREEINK_WAVEFORM_LAB=1,paper_mono 环境默认开启)。
+// 它成为编译期默认波形;运行时 CMD:WAVE SET 仍可临时覆盖。
+// 删除本文件并重新编译即完全恢复出厂波形。文件已在 .gitignore 中。
+//
+// editor-state(可拖回编辑器 JSON 导入恢复):
+${projJson().split("\n").map(l => "//   " + l).join("\n")}
+
+#pragma once
+#include <stdint.h>
+
+static const uint8_t PAPER_MONO_WAVEFORM_BAKED_PAGE_DATA[111] = {${cArray(A)}};
+#define PAPER_MONO_WAVEFORM_BAKED_PAGE PAPER_MONO_WAVEFORM_BAKED_PAGE_DATA
+`;
+  if (state.stages.B.enabled){
+    body += `
+static const uint8_t PAPER_MONO_WAVEFORM_BAKED_STAGE2_DATA[111] = {${cArray(packLut(state.stages.B.model))}};
+#define PAPER_MONO_WAVEFORM_BAKED_STAGE2 PAPER_MONO_WAVEFORM_BAKED_STAGE2_DATA
+`;
+  }
+  if (state.stages.C.enabled){
+    body += `
+static const uint8_t PAPER_MONO_WAVEFORM_BAKED_CORRECTIVE_DATA[111] = {${cArray(packLut(state.stages.C.model))}};
+#define PAPER_MONO_WAVEFORM_BAKED_CORRECTIVE PAPER_MONO_WAVEFORM_BAKED_CORRECTIVE_DATA
+`;
+  }
+  download("PaperMonoWaveformBaked.h", body, "text/plain");
+  toast("已导出 .h — 放入 driver 目录编译一次即静态化");
+});
+
+/* ================================================================ misc ui */
+document.querySelectorAll(".brush").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll(".brush").forEach(x => x.classList.remove("sel"));
+  b.classList.add("sel");
+  state.brush = +b.dataset.vs;
+}));
+document.getElementById("zoom").addEventListener("input", ev => {
+  state.zoom = +ev.target.value;
+  renderSeq();
+});
+document.getElementById("btnVcom").addEventListener("click", ev => {
+  state.showVcom = !state.showVcom;
+  ev.currentTarget.classList.toggle("on", state.showVcom);
+  renderSeq();
+});
+document.getElementById("btnUndo").addEventListener("click", popUndo);
+document.addEventListener("keydown", ev => {
+  if ((ev.metaKey || ev.ctrlKey) && ev.key === "z"){ ev.preventDefault(); popUndo(); }
+});
+let toastTimer = null;
+function toast(msg){
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.style.display = "block";
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.style.display = "none", 3200);
+}
+function renderAll(){
+  renderSeq();
+  renderSim();
+  renderVolts();
+  renderPipelineMeta();
+  renderDeviceStatus();
+}
+window.addEventListener("resize", renderSim);
+if (!navigator.serial) document.getElementById("nosupport").style.display = "block";
+
+/* self-check: the JS makeTriLut port must reproduce both firmware profiles —
+   56-frame page, 64-frame corrective, every driven class DC balanced, and an
+   idle entry 0 on the page profile. A mismatch means the port drifted from
+   Ssd1683Driver.cpp. */
+(function(){
+  const cases = [[makeTriLutJS(12,24,24), 56, true], [makeTriLutJS(16,24,32,false), 64, false]];
+  for (const [m, want, idleEntry0] of cases){
+    const f = lutFrames(m);
+    if (f !== want) console.warn(`makeTriLutJS self-check: frames=${f} (expected ${want})`);
+    for (let e=0; e<4; e++){
+      const imp = laneImpulse(m, e);
+      if (imp !== 0) console.warn(`makeTriLutJS self-check: entry ${e} impulse ${imp} (expected 0)`);
+    }
+    if (idleEntry0 && m.vs[0].some(b => b !== 0))
+      console.warn("makeTriLutJS self-check: page entry 0 is not idle");
+  }
+})();
+renderAll();
+</script>
+</body>
+</html>

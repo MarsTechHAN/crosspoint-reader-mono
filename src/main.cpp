@@ -41,6 +41,7 @@
 #include "images/LoadingIcon.h"
 #include "util/ButtonNavigator.h"
 #include "util/ScreenshotUtil.h"
+#include "util/WaveformLab.h"
 
 GfxRenderer renderer(display);
 MappedInputManager mappedInputManager(gpio, renderer);
@@ -408,6 +409,11 @@ void setup() {
   freeink::ssd1683SetGrayParams(grayParams);
   LOG_INF("MAIN", "Paper Mono gray calibration: dark=%u light=%u", grayParams.darkFrames, grayParams.lightFrames);
 #endif
+#if FREEINK_DEVICE_PAPERMONO && FREEINK_WAVEFORM_LAB
+  // Opt-in only: installs a runtime LUT override when the user has explicitly
+  // saved a boot marker via CMD:WAVE BOOT; otherwise a silent no-op.
+  WaveformLab::loadBootWaveform();
+#endif
   APP_STATE.loadFromFile();
   RECENT_BOOKS.loadFromFile();
   I18N.setLanguage(static_cast<Language>(SETTINGS.language));
@@ -653,6 +659,16 @@ void loop() {
         debugSleepTimeoutMs = 2UL * 60UL * 60UL * 1000UL;
         activityManager.noteUserInteraction();
         LOG_INF("SLP", "RAM-only auto-sleep timeout override: %lu ms", debugSleepTimeoutMs);
+#endif
+#if FREEINK_DEVICE_PAPERMONO && FREEINK_WAVEFORM_LAB
+      } else if (cmd == "WAVE" || cmd.startsWith("WAVE ")) {
+        String waveArgs = cmd.substring(4);
+        waveArgs.trim();
+        const WaveformLab::CommandResult waveResult = WaveformLab::handleCommand(waveArgs);
+        if (waveResult.requestRedraw) {
+          activityManager.noteUserInteraction();
+          activityManager.requestUpdate();
+        }
 #endif
       } else if (cmd == "BATTERY") {
         const BatteryMonitor::Status status = BatteryMonitor().readStatus();

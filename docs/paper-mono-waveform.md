@@ -128,26 +128,31 @@ multiple of three.
 
 ## Shipped waveform
 
-One activation, 64 frames, 320 ms at the 5 ms frame rate. No second stage.
+One activation. Ordinary pages run 56 frames / 280 ms at the 5 ms frame rate;
+corrective sweeps run the longer 64-frame profile. No second stage.
 
 ### Frame budget
 
-`TriParams` holds the three lengths the balance equations are derived from:
+`TriParams` holds the three lengths the balance equations are derived from.
+`makeTriLut(out, corrective)` generates both profiles from them:
 
 ```text
-preUp  = 16   activation kick, shared by all driven classes
-tGray  = 24   weak-rail (+5 V) frames that develop the middle tone
-tBlack = 32   strong-rail (+15 V) frames that develop black
+              page   corrective
+preUp    k =    12       16   activation kick, shared by all driven classes
+tGray    =      24       24   weak-rail (+5 V) frames that develop the middle tone
+tBlack   =      24       32   strong-rail (+15 V) frames that develop black
+total    =      56       64   frames
 ```
 
 Each driven class spends its own number of white frames so that its net
-`V * frames` is exactly zero, and the trajectories are right-aligned into a
-48-frame tail so every class finishes moving toward its own target:
+`V * frames` is exactly zero, and the trajectories are right-aligned into the
+tail so every class finishes moving toward its own target. For the page
+profile, into a 44-frame tail:
 
 ```text
-white: +15*16              -15*16       = 0
-gray:  +15*16  +5*24       -15*(16+8)   = 0
-black: -15*16  +15*32      -15*(32-16)  = 0
+white: +15*12  +15*12     -15*24       = 0     (packed erase, see below)
+gray:  +15*12  +5*24      -15*(12+8)   = 0
+black: -15*12  +15*24     -15*(24-12)  = 0
 ```
 
 The black class takes its kick on the opposite rail (`makeTriLut` assigns LUT
@@ -155,6 +160,23 @@ entry 3 `VS_WHITE` for the whole kick group). Kicking a pixel that is about to
 be driven black *toward* black would saturate it before the drive phase starts
 and cost the tail its headroom, so the kick pushes it white first and the
 +15 V drive that follows pays that back along with the class's white dose.
+
+That reverse swing — target black sitting on the white rail before it develops —
+is what the eye reads as the page "flashing", and it is the reason the page
+profile is 12/24 rather than 16/32. Shortening the kick and the black develop
+cuts the reverse-swing interval by a quarter while leaving `tGray` alone, so the
+middle tone still lands at ~40 % of the weak-rail swing. `tGray` remains
+settings-driven (`lightFrames`); both profiles share it.
+
+### The erase class packs before it wipes
+
+The white class could simply idle through the tail and wipe for `k` frames at
+the end. It does not. `packedErase` gives it a second `k`-frame charge toward
+black first, then wipes for `2k`. Net impulse is unchanged (still zero) and the
+timeline is the same length, but the wipe now carries twice the dose and
+arrives after an away-then-toward excursion — which is what clears the residual
+ghost that solid black areas leave when they are erased. The corrective profile
+does not use it; a corrective sweep is a full-swing reset already.
 
 `tGray` is quantized to a multiple of three because the gray class pays its
 weak-rail dose back at one third the rail voltage; a remainder would leave a
@@ -205,15 +227,30 @@ tints the nominal white background gray. If the panel ever shows "gray
 background, black glyph cores, white glyph outlines", check these writes first —
 it is not a plane or entry swap.
 
-### Entry 0 carries a background top-up
+### Entry 0 is the hold entry, and it is idle
 
-On an ordinary page, unchanged white background selects entry 0. That entry is
-not idle: a 1-frame +15 V / 5-frame -15 V white-biased top-up is folded into the
-existing kick group, inside frames the driven classes were already spending. It
-costs nothing in time and erases a little residue on every page turn, instead of
-letting ghosting accumulate until a corrective refresh. The imbalance is
-deliberate and small, chosen with the observer over a strictly balanced
-alternative that visibly failed to clean.
+On an ordinary page the driven set is `changed | target-gray`. Everything else —
+unchanged white background *and* unchanged black — selects entry 0, which is
+VSS for the whole waveform.
+
+Holding unchanged black is the fix for the "text vanishes then re-inks"
+whiteout. Per-class DC balance forces every driven black pixel to pay its dose
+in white frames, so a glyph pixel that both pages share used to be driven fully
+white for ~160 ms and then re-inked, purely to be re-anchored at a value it
+already had. No reshaping of the LUT can remove that transit; only not driving
+the pixel can. Unchanged gray stays driven, because the middle tone is the
+drift-fragile one.
+
+This is also why entry 0 no longer carries the white-biased background top-up
+(a 1-frame +15 V / 5-frame -15 V pulse folded into the kick group) that earlier
+builds used to shave residue off unchanged white on every page. Once entry 0
+also holds black, that dose bleaches held glyphs within a few pages. Residue is
+now aimed where it can be aimed: the packed erase wipe above, and the corrective
+sweep, which drives every pixel and therefore never selects entry 0 at all.
+
+The cost is that background and held-glyph re-anchoring is deferred to the
+corrective cadence (`refreshFrequency`, default every 10 pages). Judge graying
+of static glyphs across a full cadence interval, not one page turn.
 
 ## Experiment journal
 
@@ -372,6 +409,63 @@ Do not judge only one A-to-B flip. The minimum useful test set is:
 Acceptance is not merely "looks correct now." Endpoint and middle L* must stay
 within tolerance after dwell, loop endpoints must not walk, unchanged areas
 must not tint, and no transition may show a white/black reference flash.
+
+## Interactive waveform editor
+
+`tools/waveform-editor.html` is a single-file editor for the production
+pipeline above. Open it in desktop Chrome (directly from disk; Web Serial needs
+no server), connect to the running CrossPoint firmware's USB CDC port, and edit
+the three host-authored LUT slots as a drag-and-drop sequencer: the shared
+TP/RP timing is one ruler (SSD1677 timing is global across entries), each
+entry is a lane painted with one of the four source rails, and the page shows
+per-class net V·frames balance, a first-order optical prediction (±15 V ≈ 10
+frames full swing, +5 V ≈ 60 frames, as measured on this glass), and the
+driver's real `SSD1677 update:` timings parsed live from the log.
+
+The firmware side is `src/util/WaveformLab.cpp` plus override hooks in
+`Ssd1683Driver`, compiled only with `-DFREEINK_WAVEFORM_LAB=1` (on in the
+`paper_mono` dev env, absent everywhere else). It is runtime-inert by default:
+until a `CMD:WAVE SET/LOAD` installs an override — or the user has explicitly
+saved `/waveforms/boot.txt` — `runUpdate()` takes its original `makeTriLut()`
+branch and the SPI byte stream is identical to a build without the flag.
+`CMD:WAVE OFF` returns to stock behavior at any time.
+
+Slots map onto the real stages: `A` replaces the per-page tri activation, `B`
+adds a second activation (the mandatory-stage-2 structure the H experiment
+validated), `C` replaces the LUT used by corrective sweeps and falls back to
+`A`, then to the built-in waveform. The corrective cadence is the existing
+`refreshFrequency` setting; `CMD:WAVE CADENCE` changes it RAM-only.
+
+Serial protocol (over the existing `CMD:` channel, replies prefixed `WAVE:`):
+
+```text
+CMD:WAVE STATUS              mode/cadence/active-mask/baked report
+CMD:WAVE GET A|B|C           dump the slot's next-run LUT as 222 hex chars
+CMD:WAVE SET A|B|C <hex222>  install a RAM override for the slot
+CMD:WAVE CLEAR A|B|C         drop one slot's override
+CMD:WAVE OFF                 drop all overrides — stock behavior
+CMD:WAVE TEST                corrective redraw of the current screen
+CMD:WAVE CADENCE 1|5|10|15|30
+CMD:WAVE HOLD 0|1            unchanged black holds on entry 0 (default 1)
+CMD:WAVE SAVE|LOAD <name>    persist/restore /waveforms/<name>.wfm on SD
+CMD:WAVE LIST                list saved sets
+CMD:WAVE BOOT <name>|OFF     write/remove the boot marker
+```
+
+`HOLD` is on by default — it is production behaviour, described under "Entry 0
+is the hold entry" above. The command exists so an experiment can turn it *off*:
+a PAGE override whose entry 0 is not idle (the pre-bake stock LUT, for instance,
+which carried the background top-up) will bleach held black, so send `HOLD 0`
+before installing one. `WAVE OFF` restores the default along with the slots.
+
+A runtime override costs nothing per page: the LUT already travels host RAM →
+SPI on every custom activation, so the override only changes which 111 bytes
+are copied. For a compile-time default, the editor exports
+`PaperMonoWaveformBaked.h`; dropped next to `Ssd1683Driver.cpp` (gitignored) it
+replaces the generated waveform via `__has_include`, and deleting it restores
+stock. The editor's optical model is a first-order sanity check only — every
+acceptance rule in the PanelLab section (nine transitions, dwell, loops,
+temperatures) still applies before shipping a waveform.
 
 ## Source comparison
 
