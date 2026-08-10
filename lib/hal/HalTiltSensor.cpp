@@ -1,5 +1,6 @@
 #include "HalTiltSensor.h"
 
+#include <BoardConfig.h>
 #include <Logging.h>
 
 HalTiltSensor halTiltSensor;  // Singleton instance
@@ -14,23 +15,34 @@ bool HalTiltSensor::readGyro(float& gx, float& gy, float& gz) const {
 }
 
 void HalTiltSensor::begin() {
-  _available = _sdkImu.begin();
+  // Presence only: the full init (BMI270's ~0.8 s config upload on a cold
+  // boot) is deferred to ensureStarted(), so boots with every IMU feature
+  // disabled pay one WHO_AM_I read and nothing else.
+  _available = _sdkImu.probe();
   if (_available) {
     _initMs = millis();
     _lastPollMs = millis();
-    // begin() leaves the sensors sampling; stand them by until tilt page turn
-    // actually wakes them, so a disabled IMU doesn't drain the battery.
-    if (!_sdkImu.sleep()) {
-      LOG_ERR("GYR", "IMU standby failed");
-    }
-    LOG_INF("GYR", "SDK IMU initialized");
+    LOG_INF("GYR", "IMU present (init deferred)");
     return;
   }
   LOG_ERR("GYR", "SDK IMU not found");
 }
 
+bool HalTiltSensor::ensureStarted() {
+  if (_started) return true;
+  if (!_available) return false;
+  if (!_sdkImu.begin()) {
+    LOG_ERR("GYR", "IMU init failed");
+    _available = false;
+    return false;
+  }
+  _started = true;
+  LOG_INF("GYR", "SDK IMU initialized");
+  return true;
+}
+
 bool HalTiltSensor::wake() {
-  if (!_available) {
+  if (!ensureStarted()) {
     return false;
   }
 
@@ -46,8 +58,22 @@ bool HalTiltSensor::wake() {
   return true;
 }
 
+bool HalTiltSensor::armMotionWake() {
+  if (!ensureStarted()) {
+    return false;
+  }
+  if (!_sdkImu.armMotionWake()) {
+    LOG_ERR("GYR", "IMU motion-wake arm failed");
+    return false;
+  }
+  clearPendingEvents();
+  _inTilt = false;
+  _isAwake = false;
+  return true;
+}
+
 bool HalTiltSensor::deepSleep() {
-  if (!_available) {
+  if (!_available || !_started) {
     return false;
   }
 
@@ -59,31 +85,57 @@ bool HalTiltSensor::deepSleep() {
   clearPendingEvents();
   _inTilt = false;
   _isAwake = false;
+  _faceDownSinceMs = 0;
   return true;
 }
 
-void HalTiltSensor::update(const uint8_t mode, const uint8_t orientation, const bool inReader) {
+void HalTiltSensor::update(const uint8_t mode, const uint8_t orientation, const bool inReader,
+                           const bool faceDownWatch) {
   if (!_available) {
     return;
   }
 
-  // State machine: wake up or sleep based on the enabled flag
-  if ((mode != CrossPointTiltPageTurn::TILT_OFF) && !_isAwake) {
+  // State machine: the sensor runs while any consumer needs it — tilt page
+  // turns, or the face-down auto-sleep watch (which works in every activity).
+  const bool wantAwake = (mode != CrossPointTiltPageTurn::TILT_OFF) || faceDownWatch;
+  if (wantAwake && !_isAwake) {
     _isAwake = wake();
     return;
-  } else if ((mode == CrossPointTiltPageTurn::TILT_OFF) && _isAwake) {
+  } else if (!wantAwake && _isAwake) {
     _isAwake = !deepSleep();
     return;
   }
-
-  // If disabled, skip the rest of the polling logic and avoid unnecessary I2C traffic in non-reader activities
-  if ((mode == CrossPointTiltPageTurn::TILT_OFF) || !inReader) {
+  if (!wantAwake) {
     return;
   }
 
   const unsigned long now = millis();
   // Stabilization: discard readings during gyro startup transient
   if ((now - _wakeMs) < WAKE_STABILIZE_MS) {
+    return;
+  }
+
+  // Face-down watch: 2 Hz orientation sample, independent of the reader.
+  if (faceDownWatch && (now - _lastFaceDownPollMs) >= FACE_DOWN_POLL_MS) {
+    _lastFaceDownPollMs = now;
+    Imu::Sample sample;
+    if (_sdkImu.read(sample)) {
+      const float normal = sample.az * FACE_DOWN_SIGN;
+      const bool faceDown = normal > FACE_DOWN_MIN_G && fabsf(sample.ax) < FACE_DOWN_MAX_ORTHO_G &&
+                            fabsf(sample.ay) < FACE_DOWN_MAX_ORTHO_G;
+      if (faceDown) {
+        if (_faceDownSinceMs == 0) {
+          _faceDownSinceMs = now;
+          LOG_DBG("GYR", "Face-down start: a=(%.2f, %.2f, %.2f)", sample.ax, sample.ay, sample.az);
+        }
+      } else {
+        _faceDownSinceMs = 0;
+      }
+    }
+  }
+
+  // Everything below is the tilt page-turn gesture path (reader only).
+  if ((mode == CrossPointTiltPageTurn::TILT_OFF) || !inReader) {
     return;
   }
 
@@ -99,23 +151,35 @@ void HalTiltSensor::update(const uint8_t mode, const uint8_t orientation, const 
 
   // Map the gyro axis to left/right tilt based on reader orientation.
   // On the X3 PCB: X axis = left/right in portrait, Y axis = left/right in landscape.
+  // Paper Mono's BMI270 is mounted with the axis opposite the X3's QMI8658 —
+  // hardware testing confirmed its correct direction is the X3's "inverted"
+  // mapping. The inversion is baked in here so the Paper Mono setting is a
+  // plain on/off (SettingsList shows two options there); on the X3 the
+  // NORMAL/INVERTED choice keeps working as before.
+  bool invert = (mode == CrossPointTiltPageTurn::TILT_INVERTED);
+  if (BoardConfig::ACTIVE.sensors.imuType == BoardConfig::ImuType::Bmi270) {
+    invert = true;
+  }
   float tiltAxis;
   switch (orientation) {
     case CrossPointOrientation::PORTRAIT:
-      tiltAxis = mode == CrossPointTiltPageTurn::TILT_INVERTED ? -gx : gx;
+      tiltAxis = gx;
       break;
     case CrossPointOrientation::INVERTED:
-      tiltAxis = mode == CrossPointTiltPageTurn::TILT_INVERTED ? gx : -gx;
+      tiltAxis = -gx;
       break;
     case CrossPointOrientation::LANDSCAPE_CW:
-      tiltAxis = mode == CrossPointTiltPageTurn::TILT_INVERTED ? gy : -gy;
+      tiltAxis = -gy;
       break;
     case CrossPointOrientation::LANDSCAPE_CCW:
-      tiltAxis = mode == CrossPointTiltPageTurn::TILT_INVERTED ? -gy : gy;
+      tiltAxis = gy;
       break;
     default:
       tiltAxis = gx;
       break;
+  }
+  if (invert) {
+    tiltAxis = -tiltAxis;
   }
 
   if (_inTilt) {

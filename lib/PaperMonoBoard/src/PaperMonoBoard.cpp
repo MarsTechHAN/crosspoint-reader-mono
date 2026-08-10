@@ -8,20 +8,23 @@
 
 namespace PaperMonoBoard {
 namespace {
-constexpr uint8_t IOE_ADDR = 0x6F;
+// M5IOE1 expander. Production boards answer at 0x4F; early bring-up units
+// shipped at 0x6F. begin() probes in that order and latches whichever ACKs.
+constexpr uint8_t IOE_ADDR_CANDIDATES[] = {0x4F, 0x6F};
+uint8_t s_ioeAddr = IOE_ADDR_CANDIDATES[0];
 constexpr uint8_t IOE_REG_MODE = 0x03;
 constexpr uint8_t IOE_REG_OUT = 0x05;
 constexpr uint8_t IOE_REG_PULLUP = 0x09;
 constexpr uint8_t IOE_REG_PULLDOWN = 0x0B;
 constexpr uint8_t IOE_REG_DRIVE = 0x13;
 
-constexpr uint8_t IOE_EPD_POWER = 2;  // IO3
-constexpr uint8_t IOE_EPD_RESET = 4;  // IO5
-constexpr uint8_t IOE_TOUCH_RESET = 5;  // IO6
-constexpr uint8_t IOE_LED_BLUE = 1;   // IO2
-constexpr uint8_t IOE_LED_GREEN = 7;  // IO8
+constexpr uint8_t IOE_EPD_POWER = 2;     // IO3
+constexpr uint8_t IOE_EPD_RESET = 4;     // IO5
+constexpr uint8_t IOE_TOUCH_RESET = 5;   // IO6
+constexpr uint8_t IOE_LED_BLUE = 1;      // IO2
+constexpr uint8_t IOE_LED_GREEN = 7;     // IO8
 constexpr uint8_t IOE_TOUCH_POWER = 12;  // IO13
-constexpr uint8_t IOE_SD_POWER = 13;  // IO14
+constexpr uint8_t IOE_SD_POWER = 13;     // IO14
 
 constexpr uint8_t PMIC_GPIO3 = 1u << 3;
 constexpr uint8_t PMIC_GPIO3_FUNC_MASK = 0xC0;
@@ -30,9 +33,8 @@ constexpr uint8_t PMIC_PWM_ENABLE = 1u << 4;
 constexpr uint16_t FRONTLIGHT_PWM_HZ = 5000;
 constexpr uint32_t CIE_CUBIC_DENOMINATOR = 116u * 116u * 116u;
 
-constexpr uint16_t OUTPUT_MASK = (1u << IOE_EPD_POWER) | (1u << IOE_EPD_RESET) |
-                                 (1u << IOE_TOUCH_RESET) | (1u << IOE_TOUCH_POWER) |
-                                 (1u << IOE_LED_BLUE) | (1u << IOE_LED_GREEN) |
+constexpr uint16_t OUTPUT_MASK = (1u << IOE_EPD_POWER) | (1u << IOE_EPD_RESET) | (1u << IOE_TOUCH_RESET) |
+                                 (1u << IOE_TOUCH_POWER) | (1u << IOE_LED_BLUE) | (1u << IOE_LED_GREEN) |
                                  (1u << IOE_SD_POWER);
 
 bool s_ready = false;
@@ -64,11 +66,11 @@ static_assert(perceptualDuty12(50) >= 753 && perceptualDuty12(50) <= 755);
 static_assert(perceptualDuty12(100) == 4095);
 
 bool read16(uint8_t reg, uint16_t& value) {
-  Wire.beginTransmission(IOE_ADDR);
+  Wire.beginTransmission(s_ioeAddr);
   Wire.write(reg);
   if (Wire.endTransmission(false) != 0) return false;
   delayMicroseconds(500);
-  if (Wire.requestFrom(IOE_ADDR, static_cast<uint8_t>(2), static_cast<uint8_t>(true)) != 2) return false;
+  if (Wire.requestFrom(s_ioeAddr, static_cast<uint8_t>(2), static_cast<uint8_t>(true)) != 2) return false;
   const uint8_t lo = Wire.read();
   const uint8_t hi = Wire.read();
   value = static_cast<uint16_t>(lo) | (static_cast<uint16_t>(hi) << 8);
@@ -76,13 +78,24 @@ bool read16(uint8_t reg, uint16_t& value) {
 }
 
 bool write16(uint8_t reg, uint16_t value) {
-  Wire.beginTransmission(IOE_ADDR);
+  Wire.beginTransmission(s_ioeAddr);
   Wire.write(reg);
   Wire.write(static_cast<uint8_t>(value & 0xFF));
   Wire.write(static_cast<uint8_t>(value >> 8));
   if (Wire.endTransmission() != 0) return false;
   delayMicroseconds(500);
   return true;
+}
+
+// Latch whichever candidate address ACKs a UID read. Returns false when no
+// expander answers at any known address.
+bool probeIoeAddress() {
+  for (const uint8_t addr : IOE_ADDR_CANDIDATES) {
+    s_ioeAddr = addr;
+    uint16_t uid = 0;
+    if (read16(0x00, uid)) return true;
+  }
+  return false;
 }
 
 bool clearBits(uint8_t reg, uint16_t mask) {
@@ -107,8 +120,7 @@ bool writeFrontlightDuty(uint8_t percent) {
       static_cast<uint8_t>(duty12 & 0xFF),
       static_cast<uint8_t>(((duty12 >> 8) & 0x0F) | (percent > 0 ? PMIC_PWM_ENABLE : 0)),
   };
-  if (!freeink::m5pm1::writeBytes(freeink::m5pm1::REG_PWM0_DUTY_L, dutyAndControl,
-                                  sizeof(dutyAndControl)) ||
+  if (!freeink::m5pm1::writeBytes(freeink::m5pm1::REG_PWM0_DUTY_L, dutyAndControl, sizeof(dutyAndControl)) ||
       !freeink::m5pm1::writeReg16(freeink::m5pm1::REG_PWM_FREQ_L, FRONTLIGHT_PWM_HZ)) {
     return false;
   }
@@ -149,8 +161,7 @@ bool begin() {
     return false;
   }
 
-  uint16_t uid = 0;
-  if (!read16(0x00, uid)) return false;
+  if (!probeIoeAddress()) return false;
 
   uint16_t mode = 0;
   if (!read16(IOE_REG_MODE, mode) || !read16(IOE_REG_OUT, s_output)) return false;
@@ -174,9 +185,7 @@ bool begin() {
 
 bool ready() { return s_ready; }
 
-bool setFrontlightBrightness(uint8_t percent) {
-  return fadeFrontlightTo(percent);
-}
+bool setFrontlightBrightness(uint8_t percent) { return fadeFrontlightTo(percent); }
 
 bool fadeFrontlightTo(uint8_t percent, uint16_t durationMs) {
   if (!s_ready) return false;
@@ -225,6 +234,16 @@ bool pollPowerButtonClick() {
 }
 
 bool wokeByPowerButton() { return s_wokeByPowerButton; }
+
+bool wokeByMotion() { return (s_wakeSource & freeink::m5pm1::WAKE_EXT_GPIO) != 0; }
+
+bool setMotionWake(const bool enable) {
+  // IMU INT1 -> PM_G4, configured push-pull active-high by the IMU arm path,
+  // so the wake edge is rising. G4 shares its interrupt line with G3 only;
+  // the RTC's /IRQ on G0 may be armed independently later.
+  constexpr uint8_t MOTION_WAKE_GPIO = 4;
+  return freeink::m5pm1::setGpioWake(MOTION_WAKE_GPIO, /*risingEdge=*/true, enable);
+}
 
 uint8_t powerButtonConfig() { return s_powerButtonConfig; }
 

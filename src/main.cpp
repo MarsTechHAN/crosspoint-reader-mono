@@ -18,8 +18,10 @@
 #include <builtinFonts/all.h>
 
 #if FREEINK_DEVICE_PAPERMONO
+#include <M5Pm1.h>
 #include <PaperMonoBoard.h>
 #include <SDCardManager.h>
+#include <Wire.h>
 #include <driver/Ssd1683Driver.h>
 #endif
 
@@ -288,7 +290,21 @@ void enterDeepSleep(bool fromTimeout = false) {
     WiFi.mode(WIFI_OFF);
   }
 
+  // Raise-to-wake: instead of powering the IMU down, leave the accelerometer
+  // running with the any-motion interrupt mapped to INT1 (wired to the PMIC's
+  // GPIO4), and arm the PM1's wake-on-GPIO for a rising edge there. The PM1
+  // keeps the wake config across shutdown, so the disabled branch must
+  // actively clear it — a stale enable would wake the device on every bump.
+#if FREEINK_DEVICE_PAPERMONO
+  if (SETTINGS.raiseToWake && halTiltSensor.armMotionWake() && PaperMonoBoard::setMotionWake(true)) {
+    LOG_INF("SLP", "Raise-to-wake armed (IMU INT1 -> PM_G4)");
+  } else {
+    PaperMonoBoard::setMotionWake(false);
+    halTiltSensor.deepSleep();
+  }
+#else
   halTiltSensor.deepSleep();
+#endif
 #if FREEINK_DEVICE_PAPERMONO
   // Match the board's hard-off order: extinguish the frontlight and quiesce
   // switched peripherals before putting the panel controller to sleep. No
@@ -442,6 +458,12 @@ void setup() {
   grayParams.lightFrames = SETTINGS.grayLightFrames;
   freeink::ssd1683SetGrayParams(grayParams);
   LOG_INF("MAIN", "Paper Mono gray calibration: dark=%u light=%u", grayParams.darkFrames, grayParams.lightFrames);
+  // Paper Mono's tilt setting is a plain on/off (the BMI270 mounting inversion
+  // is baked into HalTiltSensor); fold a stale 3-state INVERTED value into ON
+  // so the two-option settings UI never indexes past its label list.
+  if (SETTINGS.tiltPageTurn >= CrossPointSettings::TILT_NVERTED) {
+    SETTINGS.tiltPageTurn = CrossPointSettings::TILT_NORMAL;
+  }
 #endif
 #if FREEINK_DEVICE_PAPERMONO && FREEINK_WAVEFORM_LAB
   // Opt-in only: installs a runtime LUT override when the user has explicitly
@@ -639,7 +661,8 @@ void loop() {
   rawInputActive = rawInputActive || gpio.isTouchHeldAt(touchX, touchY);
   activityManager.setUserInputActive(rawInputActive);
 #endif
-  halTiltSensor.update(SETTINGS.tiltPageTurn, SETTINGS.orientation, activityManager.isReaderActivity());
+  halTiltSensor.update(SETTINGS.tiltPageTurn, SETTINGS.orientation, activityManager.isReaderActivity(),
+                       SETTINGS.getFaceDownSleepMs() > 0);
 
   renderer.setFadingFix(SETTINGS.fadingFix);
 
@@ -693,6 +716,41 @@ void loop() {
         debugSleepTimeoutMs = 2UL * 60UL * 60UL * 1000UL;
         activityManager.noteUserInteraction();
         LOG_INF("SLP", "RAM-only auto-sleep timeout override: %lu ms", debugSleepTimeoutMs);
+      } else if (cmd == "IMUTEST") {
+        // Raise-to-wake chain probe: arm exactly the sleep-time configuration,
+        // then sample the BMI270's live INT status and the PM1's GPIO input
+        // for 8 s while the user shakes / rests the device. Shows precisely
+        // where the chain breaks: feature not firing (anymot stays 0), INT1
+        // not reaching the PMIC (anymot 1 but G4 0), or PMIC-side wake.
+        activityManager.noteUserInteraction();
+        if (halTiltSensor.armMotionWake()) {
+          const bool pm1Ok = PaperMonoBoard::setMotionWake(true);
+          uint8_t wakeEn = 0;
+          uint8_t wakeCfg = 0;
+          freeink::m5pm1::readReg(freeink::m5pm1::REG_GPIO_WAKE_EN, &wakeEn);
+          freeink::m5pm1::readReg(freeink::m5pm1::REG_GPIO_WAKE_CFG, &wakeCfg);
+          LOG_INF("IMU", "Armed: pm1Ok=%d WAKE_EN=0x%02X WAKE_CFG=0x%02X (expect G4 bit: 0x10)", pm1Ok, wakeEn,
+                  wakeCfg);
+          const uint8_t imuAddr = BoardConfig::ACTIVE.sensors.imuAddr;
+          for (int i = 0; i < 16; ++i) {
+            uint8_t intStatus = 0;
+            Wire.beginTransmission(imuAddr);
+            Wire.write(0x1C);  // BMI270 INT_STATUS_0; bit6 = any-motion
+            if (Wire.endTransmission(false) == 0 && Wire.requestFrom(imuAddr, static_cast<uint8_t>(1)) == 1) {
+              intStatus = Wire.read();
+            }
+            uint8_t gpioIn = 0;
+            freeink::m5pm1::readReg(freeink::m5pm1::REG_GPIO_IN, &gpioIn);
+            LOG_INF("IMU", "INT_STATUS0=0x%02X anymot=%d | PM1 GPIO_IN=0x%02X G4=%d", intStatus, (intStatus >> 6) & 1,
+                    gpioIn, (gpioIn >> 4) & 1);
+            delay(500);
+          }
+          PaperMonoBoard::setMotionWake(false);
+          halTiltSensor.deepSleep();  // loop() re-wakes it if tilt/face-down is on
+          LOG_INF("IMU", "IMUTEST done; motion wake disarmed");
+        } else {
+          LOG_ERR("IMU", "IMUTEST: armMotionWake failed");
+        }
 #endif
 #if FREEINK_DEVICE_PAPERMONO && FREEINK_WAVEFORM_LAB
       } else if (cmd == "WAVE" || cmd.startsWith("WAVE ")) {
@@ -767,6 +825,15 @@ void loop() {
     LOG_DBG("SLP", "Auto-sleep triggered after %lu ms of inactivity", sleepTimeoutMs);
     enterDeepSleep(true);
     // This should never be hit as `enterDeepSleep` calls esp_deep_sleep_start
+    return;
+  }
+
+  // Face-down auto-sleep: the IMU watch (HalTiltSensor) times how long the
+  // device has been lying screen-down; past the configured delay, sleep now.
+  const uint32_t faceDownSleepMs = SETTINGS.getFaceDownSleepMs();
+  if (faceDownSleepMs > 0 && millis() >= allowSleepAt && halTiltSensor.faceDownForMs() >= faceDownSleepMs) {
+    LOG_INF("SLP", "Face-down for %lu ms; sleeping", static_cast<unsigned long>(faceDownSleepMs));
+    enterDeepSleep(true);
     return;
   }
 

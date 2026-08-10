@@ -313,11 +313,26 @@ inline const std::vector<SettingInfo>& getBaseSettingsList() {
             StrId::STR_SHORT_PWR_BTN, &CrossPointSettings::shortPwrBtn,
             {StrId::STR_IGNORE, StrId::STR_SLEEP, StrId::STR_PAGE_TURN, StrId::STR_FORCE_REFRESH, StrId::STR_FOOTNOTES},
             "shortPwrBtn", StrId::STR_CAT_CONTROLS),
-        // Always present in the base list so it round-trips through settings.json
-        // on every board; getSettingsList() hides it where no IMU is fitted.
+    // Always present in the base list so it round-trips through settings.json
+    // on every board; getSettingsList() hides it where no IMU is fitted.
+#if FREEINK_DEVICE_PAPERMONO
+        // Paper Mono has one correct tilt direction (the BMI270's mounting
+        // inversion is baked into HalTiltSensor), so the setting is a plain
+        // on/off. Value 1 (= TILT_NORMAL) is "on".
+        SettingInfo::Enum(StrId::STR_TILT_PAGE_TURN, &CrossPointSettings::tiltPageTurn,
+                          {StrId::STR_STATE_OFF, StrId::STR_STATE_ON}, "tiltPageTurn", StrId::STR_CAT_CONTROLS),
+#else
         SettingInfo::Enum(StrId::STR_TILT_PAGE_TURN, &CrossPointSettings::tiltPageTurn,
                           {StrId::STR_STATE_OFF, StrId::STR_NORMAL, StrId::STR_INVERTED}, "tiltPageTurn",
                           StrId::STR_CAT_CONTROLS),
+#endif
+        // IMU-backed power features, hidden with tilt where no IMU is fitted.
+        SettingInfo::Toggle(StrId::STR_RAISE_TO_WAKE, &CrossPointSettings::raiseToWake, "raiseToWake",
+                            StrId::STR_CAT_SYSTEM),
+        SettingInfo::Enum(
+            StrId::STR_FACE_DOWN_SLEEP, &CrossPointSettings::faceDownSleep,
+            {StrId::STR_STATE_OFF, StrId::STR_DURATION_10S, StrId::STR_DURATION_30S, StrId::STR_DURATION_60S},
+            "faceDownSleep", StrId::STR_CAT_SYSTEM),
         SettingInfo::Toggle(StrId::STR_PWR_BTN_FOOTNOTE_BACK, &CrossPointSettings::pwrBtnFootnoteBack,
                             "pwrBtnFootnoteBack", StrId::STR_CAT_CONTROLS),
         SettingInfo::Toggle(StrId::STR_BACK_SHORT_TO_FILE_BROWSER, &CrossPointSettings::backShortToFileBrowser,
@@ -446,8 +461,10 @@ inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* regist
                              case StrId::STR_FRONT_BTN_FOLLOW_ORIENTATION:
                              case StrId::STR_SUNLIGHT_FADING_FIX:
                                return hasTouch;
-                             // QMI8658 IMU (X3) only.
+                             // IMU boards only (X3's QMI8658, Paper Mono's BMI270).
                              case StrId::STR_TILT_PAGE_TURN:
+                             case StrId::STR_RAISE_TO_WAKE:
+                             case StrId::STR_FACE_DOWN_SLEEP:
                                return !hasTilt;
                              default:
                                return false;

@@ -132,11 +132,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   // Paper Mono reader page-turn policy. UI screens always remain binary and
   // use the controller's internal OTP fast waveform; this setting only gates
   // grayscale composition inside book readers.
-  enum READER_REFRESH_MODE {
-    READER_REFRESH_FAST = 0,
-    READER_REFRESH_BALANCED = 1,
-    READER_REFRESH_MODE_COUNT
-  };
+  enum READER_REFRESH_MODE { READER_REFRESH_FAST = 0, READER_REFRESH_BALANCED = 1, READER_REFRESH_MODE_COUNT };
 
   // Short power button press actions
   enum SHORT_PWRBTN { IGNORE = 0, SLEEP = 1, PAGE_TURN = 2, FORCE_REFRESH = 3, FOOTNOTES = 4, SHORT_PWRBTN_COUNT };
@@ -176,6 +172,15 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   enum IMAGE_RENDERING { IMAGES_DISPLAY = 0, IMAGES_PLACEHOLDER = 1, IMAGES_SUPPRESS = 2, IMAGE_RENDERING_COUNT };
 
   enum TILT_PAGE_TURN { TILT_OFF = 0, TILT_NORMAL = 1, TILT_NVERTED = 2, TILT_PAGE_TURN_COUNT };
+
+  // Screen-down auto-sleep delay (IMU boards). OFF disables the watch.
+  enum FACE_DOWN_SLEEP {
+    FACE_DOWN_SLEEP_OFF = 0,
+    FACE_DOWN_SLEEP_10S = 1,
+    FACE_DOWN_SLEEP_30S = 2,
+    FACE_DOWN_SLEEP_60S = 3,
+    FACE_DOWN_SLEEP_COUNT
+  };
 
   enum TOUCH_READER_CONTROLS { TOUCH_READER_OFF = 0, TOUCH_READER_ON = 1, TOUCH_READER_CONTROLS_COUNT };
 
@@ -295,8 +300,24 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t backShortToFileBrowser = 0;
   // Image rendering mode in EPUB reader
   uint8_t imageRendering = IMAGES_DISPLAY;
-  // Tilt-based page turning (X3 only — requires QMI8658 IMU)
+  // Tilt-based page turning (IMU boards: X3's QMI8658, Paper Mono's BMI270)
   uint8_t tiltPageTurn = TILT_OFF;
+  // Wake from sleep by picking the device up (IMU any-motion INT via the PMIC)
+  uint8_t raiseToWake = 0;
+  // Auto-sleep after the device lies screen-down for the configured delay
+  uint8_t faceDownSleep = FACE_DOWN_SLEEP_OFF;
+  uint32_t getFaceDownSleepMs() const {
+    switch (faceDownSleep) {
+      case FACE_DOWN_SLEEP_10S:
+        return 10000;
+      case FACE_DOWN_SLEEP_30S:
+        return 30000;
+      case FACE_DOWN_SLEEP_60S:
+        return 60000;
+      default:
+        return 0;
+    }
+  }
   // Touch screen reader zones/gestures on boards with a touch controller.
   uint8_t touchReaderControls = TOUCH_READER_ON;
   // Language setting (Language enum index, default 0 = EN)
