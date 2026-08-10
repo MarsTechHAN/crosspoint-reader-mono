@@ -3,10 +3,10 @@
 #include <Epub/FootnoteEntry.h>
 #include <Epub/Page.h>
 #include <Epub/Section.h>
-
-#include <optional>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+
+#include <optional>
 
 #include "BookmarkEntry.h"
 #include "EndOfBookOptions.h"
@@ -72,6 +72,52 @@ class EpubReaderActivity final : public Activity {
   uint8_t* grayLsbPlaneBuffer = nullptr;
   uint8_t* grayMsbPlaneBuffer = nullptr;
   size_t grayPlaneBufferBytes = 0;
+  // PSRAM shadow page cache: the adjacent pages, fully composed (B/W target
+  // incl. status bar, plus both gray selector planes when the settings call
+  // for them) during the idle tail of the previous render. A page turn that
+  // hits a slot skips the entire compose phase — the critical path collapses
+  // to a 48 KB memcpy plus the driver's host-RAM plane staging, so the panel
+  // waveform starts within milliseconds of the input event. Slots allocate
+  // from PSRAM only (allocation failure disables the feature, so C3 boards
+  // never pay for it).
+  struct ShadowPageSlot {
+    uint8_t* bw = nullptr;
+    uint8_t* lsb = nullptr;
+    uint8_t* msb = nullptr;
+    int spine = -1;
+    int page = -1;
+    bool valid = false;
+    bool hasGrayPlanes = false;
+    // Compose-time snapshot of everything the foreground path would derive
+    // per render; a mismatch at consume time falls back to the slow path.
+    bool balanced = false;
+    bool textAA = false;
+    bool bookmarked = false;
+    std::vector<FootnoteEntry> footnotes;
+  };
+  ShadowPageSlot shadowNext;
+  ShadowPageSlot shadowPrev;
+  bool shadowAllocFailed = false;
+  bool ensureShadowBuffers();
+  void invalidateShadowSlots() {
+    shadowNext.valid = false;
+    shadowPrev.valid = false;
+  }
+  // Render every page element with an interruption poll between elements, so
+  // an idle compose abandons within one text line of a new input edge.
+  bool renderPageElementsAbortable(const Page& page, int fontId, int xOffset, int yOffset, bool imagesOnly) const;
+  bool shadowComposeInterrupted() const;
+  bool isPageBookmarked(int page) const;
+  // Compose one adjacent page into `slot` off-screen. Returns false (slot
+  // invalid) when interrupted, out of range, or under heap pressure.
+  bool composeShadowSlot(ShadowPageSlot& slot, int targetPage, int orientedMarginTop, int orientedMarginRight,
+                         int orientedMarginBottom, int orientedMarginLeft);
+  // Idle tail of render(): refill whichever slots don't match currentPage±1.
+  void maybeComposeShadowSlots(int orientedMarginTop, int orientedMarginRight, int orientedMarginBottom,
+                               int orientedMarginLeft);
+  // Fast page-turn path: publish a pre-composed slot. Returns false if any
+  // precondition fails (caller falls through to the normal compose path).
+  bool renderFromShadow(ShadowPageSlot& slot);
   unsigned long lastRenderCompleteMs = 0;
   bool bookmarkRemoved = false;  // true when last toggle removed (controls popup text)
   std::vector<BookmarkEntry> cachedBookmarks;
@@ -115,7 +161,10 @@ class EpubReaderActivity final : public Activity {
 
   void renderContents(std::unique_ptr<Page> page, int orientedMarginTop, int orientedMarginRight,
                       int orientedMarginBottom, int orientedMarginLeft);
-  void renderStatusBar() const;
+  // Draws the bar for the page the CURRENTLY ACTIVE render target shows: the
+  // live page by default, or a shadow compose target's page when overridden.
+  void renderStatusBar() const { renderStatusBar(section->currentPage, currentPageBookmarked); }
+  void renderStatusBar(int pageIndex, bool pageBookmarked) const;
   // Pages laid out per incremental-build pump: on the render path (catching up to the page
   // being shown) and per loop() tick (background build of a large chapter). Kept small so a
   // background build chunk never noticeably delays input or a pending render.
@@ -201,7 +250,9 @@ class EpubReaderActivity final : public Activity {
   void toggleAutoPageTurn(uint8_t selectedPageTurnOption);
   void pageTurn(bool isForwardTurn);
   void applyQueuedPageTurn(bool isForwardTurn);
-  void drainQueuedPageTurns();
+  // Returns the number of queued turns applied, so render() can tell a
+  // user-visible page turn from a plain re-render.
+  int drainQueuedPageTurns();
   void loadCachedBookmarks();
   void addBookmark();
   void updateBookmarkFlag();
@@ -216,8 +267,8 @@ class EpubReaderActivity final : public Activity {
       : Activity("EpubReader", renderer, mappedInput),
         epub(std::move(epub)),
         pagesUntilFullRefresh(initialRefreshCountdown) {
-    pageTurnQueue = xQueueCreateStatic(PAGE_TURN_QUEUE_DEPTH, sizeof(int8_t), pageTurnQueueBytes,
-                                       &pageTurnQueueStorage);
+    pageTurnQueue =
+        xQueueCreateStatic(PAGE_TURN_QUEUE_DEPTH, sizeof(int8_t), pageTurnQueueBytes, &pageTurnQueueStorage);
     assert(pageTurnQueue != nullptr);
   }
   ~EpubReaderActivity() override;

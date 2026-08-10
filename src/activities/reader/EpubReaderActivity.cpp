@@ -154,6 +154,49 @@ EpubReaderActivity::~EpubReaderActivity() {
   if (pageTurnQueue) vQueueDelete(pageTurnQueue);
   heap_caps_free(grayLsbPlaneBuffer);
   heap_caps_free(grayMsbPlaneBuffer);
+  for (ShadowPageSlot* slot : {&shadowNext, &shadowPrev}) {
+    heap_caps_free(slot->bw);
+    heap_caps_free(slot->lsb);
+    heap_caps_free(slot->msb);
+  }
+}
+
+bool EpubReaderActivity::ensureShadowBuffers() {
+  if (shadowAllocFailed) return false;
+  if (shadowNext.bw && shadowPrev.bw) return true;
+  const size_t planeBytes = renderer.getBufferSize();
+  // PSRAM only: on boards without it (X4/X3) the first allocation fails once
+  // and the shadow cache stays disabled — internal DRAM is never touched.
+  const auto allocate = [planeBytes] {
+    return static_cast<uint8_t*>(heap_caps_malloc(planeBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  };
+  for (ShadowPageSlot* slot : {&shadowNext, &shadowPrev}) {
+    if (!slot->bw) slot->bw = allocate();
+    if (!slot->lsb) slot->lsb = allocate();
+    if (!slot->msb) slot->msb = allocate();
+    if (!slot->bw || !slot->lsb || !slot->msb) {
+      shadowAllocFailed = true;
+      LOG_DBG("ERS", "Shadow page cache disabled (no PSRAM for %u-byte planes)", static_cast<unsigned>(planeBytes));
+      return false;
+    }
+  }
+  return true;
+}
+
+bool EpubReaderActivity::shadowComposeInterrupted() const {
+  // displayWorkAborted() flips on the raw input edge (noteUserInteraction), so
+  // a compose yields within one element of the user touching anything.
+  return renderer.displayWorkAborted() || (pageTurnQueue && uxQueueMessagesWaiting(pageTurnQueue) > 0);
+}
+
+bool EpubReaderActivity::renderPageElementsAbortable(const Page& page, const int fontId, const int xOffset,
+                                                     const int yOffset, const bool imagesOnly) const {
+  for (const auto& element : page.elements) {
+    if (shadowComposeInterrupted()) return false;
+    if (imagesOnly && element->getTag() != TAG_PageImage) continue;
+    element->render(renderer, fontId, xOffset, yOffset);
+  }
+  return !shadowComposeInterrupted();
 }
 
 void EpubReaderActivity::onEnter() {
@@ -348,9 +391,8 @@ void EpubReaderActivity::loop() {
   // floors. Cross-chapter prewarm is deliberately out of scope (next spine's
   // section isn't loaded).
   if (backgroundWorkAllowed() && section && !section->isBuilding() && !RenderLock::peek() &&
-      renderer.hasFrameBuffer() &&
-      lastRenderCompleteMs != 0 &&
-      ESP.getFreeHeap() > RENDER_MIN_FREE_HEAP && ESP.getMaxAllocHeap() > BACKGROUND_BUILD_MIN_MAX_ALLOC &&
+      renderer.hasFrameBuffer() && lastRenderCompleteMs != 0 && ESP.getFreeHeap() > RENDER_MIN_FREE_HEAP &&
+      ESP.getMaxAllocHeap() > BACKGROUND_BUILD_MIN_MAX_ALLOC &&
       (idlePrewarmSpine != currentSpineIndex || idlePrewarmPage != section->currentPage)) {
     RenderLock lock;  // the page table must not change under the scan
     // Re-check under the lock: peek() and acquisition are not atomic, so the render
@@ -378,8 +420,8 @@ void EpubReaderActivity::loop() {
           prefetchedPage = std::move(p);
           prefetchedSpine = currentSpineIndex;
           prefetchedPageNumber = nextPage;
-          LOG_DBG("ERS", "Idle prefetch retained: spine=%d page=%d in %lums", prefetchedSpine,
-                  prefetchedPageNumber, millis() - t0);
+          LOG_DBG("ERS", "Idle prefetch retained: spine=%d page=%d in %lums", prefetchedSpine, prefetchedPageNumber,
+                  millis() - t0);
         }
       }
     }
@@ -1034,12 +1076,15 @@ void EpubReaderActivity::pageTurn(bool isForwardTurn) {
   requestUpdate();
 }
 
-void EpubReaderActivity::drainQueuedPageTurns() {
-  if (!pageTurnQueue) return;
+int EpubReaderActivity::drainQueuedPageTurns() {
+  if (!pageTurnQueue) return 0;
+  int applied = 0;
   int8_t direction = 0;
   while (section && xQueueReceive(pageTurnQueue, &direction, 0) == pdTRUE) {
     applyQueuedPageTurn(direction > 0);
+    applied++;
   }
+  return applied;
 }
 
 void EpubReaderActivity::applyQueuedPageTurn(bool isForwardTurn) {
@@ -1071,8 +1116,7 @@ void EpubReaderActivity::applyQueuedPageTurn(bool isForwardTurn) {
   }
   lastPageTurnTime = millis();
   LOG_DBG("ERS", "Page turn applied: dir=%s from=%d:%d to=%d:%d decision=%lums", isForwardTurn ? "next" : "prev",
-          oldSpine, oldPage, currentSpineIndex, section ? section->currentPage : nextPageNumber,
-          millis() - inputAt);
+          oldSpine, oldPage, currentSpineIndex, section ? section->currentPage : nextPageNumber, millis() - inputAt);
 }
 
 // TODO: Failure handling
@@ -1107,7 +1151,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
 
   // The render task is the only owner which mutates page/spine state for
   // ordinary turns. Input remains responsive by only enqueueing intents.
-  drainQueuedPageTurns();
+  int appliedPageTurns = drainQueuedPageTurns();
 
   // Show end of book screen
   if (currentSpineIndex == epub->getSpineItemsCount()) {
@@ -1154,6 +1198,10 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     const auto filepath = epub->getSpineItem(currentSpineIndex).href;
     LOG_DBG("ERS", "Loading file: %s, index: %d", filepath.c_str(), currentSpineIndex);
     section = std::unique_ptr<Section>(new Section(epub, currentSpineIndex, renderer));
+    // A new Section means new pagination (orientation change, chapter jump,
+    // settings reflow): shadow slots composed against the old layout could
+    // collide with the new page numbering, so drop them here.
+    invalidateShadowSlots();
     // Fresh section, fresh chance: a failed lazy extension start in a previous
     // section must not suppress watermark-triggered rebuilds for this one.
     partialRebuildStartFailed = false;
@@ -1339,7 +1387,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   // A burst can cross a chapter boundary. Consume the rest only after the new
   // section exists. If it crosses again, schedule another serialized render
   // and avoid presenting this now-obsolete intermediate chapter.
-  drainQueuedPageTurns();
+  appliedPageTurns += drainQueuedPageTurns();
   if (!section) {
     requestUpdate();
     return;
@@ -1426,7 +1474,21 @@ void EpubReaderActivity::render(RenderLock&& lock) {
 
   updateBookmarkFlag();
 
+  // Shadow fast path: a page turn whose target was pre-composed into PSRAM
+  // publishes with two memcpys and starts the waveform immediately — the
+  // scan/prewarm/B-W/grayscale compose below is skipped entirely.
+  bool renderedFromShadow = false;
   {
+    ShadowPageSlot* hit = nullptr;
+    if (shadowNext.valid && shadowNext.spine == currentSpineIndex && shadowNext.page == section->currentPage) {
+      hit = &shadowNext;
+    } else if (shadowPrev.valid && shadowPrev.spine == currentSpineIndex && shadowPrev.page == section->currentPage) {
+      hit = &shadowPrev;
+    }
+    if (hit) renderedFromShadow = renderFromShadow(*hit);
+  }
+
+  if (!renderedFromShadow) {
     // Unified page read: the in-progress build's in-RAM table if it has reached the page,
     // otherwise the on-disk file (finalized section, or a partial from a previous session).
     const auto loadStarted = millis();
@@ -1498,6 +1560,23 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   if (showDictionaryMessage) {
     GUI.drawPopup(renderer, tr(STR_DICT_NO_DICT_SET));
   }
+
+  // A page turn whose frame was dropped by an input-edge abort (e.g. the
+  // release half of a touch-down turn landing mid-compose) would otherwise
+  // leave the panel on the OLD page with nothing scheduled: the abort alone
+  // bumps no update sequence. Re-request exactly that lost frame. Identical
+  // -frame skips don't trip this (no abort), so menu re-renders stay quiet.
+  if (appliedPageTurns > 0 && !renderer.displayCommitted() && renderer.displayWorkAborted() &&
+      uxQueueMessagesWaiting(pageTurnQueue) == 0) {
+    LOG_DBG("ERS", "Page turn frame dropped by input abort; re-requesting");
+    requestUpdate();
+    return;
+  }
+
+  // Idle tail: pre-compose the adjacent pages into PSRAM while the user reads.
+  // Interruptible between elements, so a queued turn claims the render task
+  // within a text line.
+  maybeComposeShadowSlots(orientedMarginTop, orientedMarginRight, orientedMarginBottom, orientedMarginLeft);
 }
 
 bool EpubReaderActivity::applyDeferredReposition() {
@@ -1543,6 +1622,10 @@ void EpubReaderActivity::saveProgressIfNeeded() {
 void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int orientedMarginTop,
                                         const int orientedMarginRight, const int orientedMarginBottom,
                                         const int orientedMarginLeft) {
+  // Any slow-path render may reflect state the idle composes couldn't see
+  // (battery/charging change, bookmark edits, auto-turn indicator). Drop the
+  // slots; the idle tail recomposes both against the state just drawn.
+  invalidateShadowSlots();
   lastPageDisplayCommitted = false;
   const auto t0 = millis();
   const int fontId = SETTINGS.getReaderFontId();
@@ -1590,8 +1673,8 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
     renderer.setGrayscaleClipRect(orientedMarginLeft, orientedMarginTop,
                                   renderer.getScreenWidth() - orientedMarginLeft - orientedMarginRight,
                                   renderer.getScreenHeight() - orientedMarginTop - orientedMarginBottom);
-    LOG_DBG("ERS", "Four-gray clip: x=%d..%d y=%d..%d", renderer.grayscaleClipX0(),
-            renderer.grayscaleClipX1(), renderer.grayscaleClipY0(), renderer.grayscaleClipY1());
+    LOG_DBG("ERS", "Four-gray clip: x=%d..%d y=%d..%d", renderer.grayscaleClipX0(), renderer.grayscaleClipX1(),
+            renderer.grayscaleClipY0(), renderer.grayscaleClipY1());
   }
   // Other panels can overlap selector composition with a base refresh. Paper
   // Mono instead stages the complete B/W target and both selector planes in
@@ -1819,8 +1902,7 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
               "(planes buffered: %d, traversals: %d)",
               tPrewarm - t0, tBwRender - tPrewarm, tDisplay - tBwRender, tGrayRender - tDisplay,
               tGrayStage - tGrayRender, tOverlapPrefetch - tGrayStage, tWait - tOverlapPrefetch, tGrayWrite - tWait,
-              tGrayDisplay - tGrayWrite, tEnd - tGrayDisplay, tEnd - t0, msbPlaneBuf ? 2 : 1,
-              msbPlaneBuf ? 1 : 2);
+              tGrayDisplay - tGrayWrite, tEnd - tGrayDisplay, tEnd - t0, msbPlaneBuf ? 2 : 1, msbPlaneBuf ? 1 : 2);
     } else {
       // Per-strip scratch tier: blocking panels (X3) and the OOM fallback.
       // The strip writes below need the panel idle, so wait out any pending
@@ -1960,10 +2042,10 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
   }
 }
 
-void EpubReaderActivity::renderStatusBar() const {
+void EpubReaderActivity::renderStatusBar(const int pageIndex, const bool pageBookmarked) const {
   // Calculate progress in book. Use the estimated total while a giant spine is still building so
   // "page X of Y" and the progress bar don't read off the small build watermark.
-  const int currentPage = section->currentPage + 1;
+  const int currentPage = pageIndex + 1;
   const float pageCount = section->estimatedTotalPages();
   const float sectionChapterProg = (pageCount > 0) ? (static_cast<float>(currentPage) / pageCount) : 0;
   const float bookProgress = epub->calculateProgress(currentSpineIndex, sectionChapterProg) * 100;
@@ -1996,7 +2078,7 @@ void EpubReaderActivity::renderStatusBar() const {
     title = epub->getTitle();
   }
 
-  GUI.drawStatusBar(renderer, bookProgress, currentPage, pageCount, title, 0, textYOffset, true, currentPageBookmarked,
+  GUI.drawStatusBar(renderer, bookProgress, currentPage, pageCount, title, 0, textYOffset, true, pageBookmarked,
                     section->isBuilding());
 }
 
@@ -2123,15 +2205,226 @@ void EpubReaderActivity::addBookmark() {
 }
 
 void EpubReaderActivity::updateBookmarkFlag() {
+  currentPageBookmarked = isPageBookmarked(section ? section->currentPage : 0);
+}
+
+bool EpubReaderActivity::isPageBookmarked(const int page) const {
   if (!section || !epub || cachedBookmarks.empty()) {
-    currentPageBookmarked = false;
-    return;
+    return false;
   }
   const int pageCount = section->estimatedTotalPages();
-  const ProgressRange pageRange = getPageProgressRange(epub, currentSpineIndex, section->currentPage, pageCount);
-  currentPageBookmarked = std::any_of(cachedBookmarks.begin(), cachedBookmarks.end(), [&](const BookmarkEntry& b) {
-    return bookmarkMatchesProgress(b, currentSpineIndex, section->currentPage, pageCount, pageRange);
+  const ProgressRange pageRange = getPageProgressRange(epub, currentSpineIndex, page, pageCount);
+  return std::any_of(cachedBookmarks.begin(), cachedBookmarks.end(), [&](const BookmarkEntry& b) {
+    return bookmarkMatchesProgress(b, currentSpineIndex, page, pageCount, pageRange);
   });
+}
+
+bool EpubReaderActivity::composeShadowSlot(ShadowPageSlot& slot, const int targetPage, const int orientedMarginTop,
+                                           const int orientedMarginRight, const int orientedMarginBottom,
+                                           const int orientedMarginLeft) {
+  slot.valid = false;
+  if (!section || targetPage < 0 || targetPage >= static_cast<int>(section->pageCount)) return false;
+  if (shadowComposeInterrupted() || !renderer.hasFrameBuffer()) return false;
+  // Page deserialization and glyph loads allocate through throwing paths that
+  // abort() on OOM under -fno-exceptions; this is deferrable work, so skip it
+  // under heap pressure (same floors as the idle glyph prewarm).
+  if (ESP.getFreeHeap() < RENDER_MIN_FREE_HEAP || ESP.getMaxAllocHeap() < BACKGROUND_BUILD_MIN_MAX_ALLOC) return false;
+
+  const auto t0 = millis();
+  const int fontId = SETTINGS.getReaderFontId();
+
+  std::unique_ptr<Page> p;
+  if (prefetchedPage && prefetchedSpine == currentSpineIndex && prefetchedPageNumber == targetPage) {
+    p = std::move(prefetchedPage);
+  } else {
+    p = section->loadPage(targetPage);
+  }
+  if (!p) return false;
+  const auto tLoad = millis();
+
+  // Retain the deserialized page for the fallback (slow) path and the next
+  // compose attempt, whatever happens below.
+  struct PageKeeper {
+    EpubReaderActivity& self;
+    std::unique_ptr<Page>& page;
+    int targetPage;
+    ~PageKeeper() {
+      if (!page) return;
+      self.prefetchedPage = std::move(page);
+      self.prefetchedSpine = self.currentSpineIndex;
+      self.prefetchedPageNumber = targetPage;
+    }
+  } pageKeeper{*this, p, targetPage};
+
+  // Same glyph prewarm as the foreground render — and, like the foreground,
+  // the scope must stay alive across BOTH pixel passes below: PrewarmScope's
+  // destructor clears every glyph cache, so a block-scoped prewarm would leave
+  // the passes decompressing each glyph on every draw (measured ~15x slower).
+  std::optional<FontCacheManager::PrewarmScope> prewarmScope;
+  if (auto* fcm = renderer.getFontCacheManager()) {
+    prewarmScope.emplace(*fcm);
+    p->render(renderer, fontId, 0, 0);  // scan only, no pixels
+    prewarmScope->endScanAndPrewarm();
+  }
+  idlePrewarmSpine = currentSpineIndex;
+  idlePrewarmPage = section->currentPage;
+  if (shadowComposeInterrupted()) return false;
+  const auto tPrewarm = millis();
+
+  // Mirror renderContents()'s per-page mode decision exactly.
+  const bool pageHasImages = p->hasImages();
+  const bool balanced = ReaderUtils::useBalancedReaderRefresh();
+  const bool textAA = SETTINGS.textAntiAliasing;
+  const bool needsTextGrayscale = balanced && textAA;
+  const bool needsAnyGrayscale = balanced && (needsTextGrayscale || pageHasImages);
+  const bool grayAwareBase = needsAnyGrayscale || pageHasImages;
+  const bool wantGrayPlanes = needsAnyGrayscale && renderer.supportsStripGrayscale();
+
+  // The image pixel cache lives for exactly one compose (mirrors the
+  // foreground PxcSlotGuard).
+  struct PxcSlotGuard {
+    ~PxcSlotGuard() { ImageBlock::releaseRenderCache(); }
+  } pxcSlotGuard;
+
+  const int gh = renderer.getDisplayHeight();
+  const bool slotBookmarked = isPageBookmarked(targetPage);
+
+  // B/W target (incl. status bar for the target page) into the off-screen
+  // strip; every reader draw primitive honors the strip target, so the live
+  // framebuffer and panel state stay untouched.
+  renderer.setRenderMode(grayAwareBase ? GfxRenderer::BW_GRAY_BASE : GfxRenderer::BW);
+  renderer.beginStripTarget(slot.bw, 0, gh);
+  renderer.clearScreen();
+  bool ok = renderPageElementsAbortable(*p, fontId, orientedMarginLeft, orientedMarginTop, false);
+  if (ok) renderStatusBar(targetPage, slotBookmarked);
+  renderer.endStripTarget();
+  renderer.setRenderMode(GfxRenderer::BW);
+  if (!ok || shadowComposeInterrupted()) return false;
+  const auto tBw = millis();
+
+  slot.hasGrayPlanes = false;
+  if (wantGrayPlanes) {
+    renderer.setGrayscaleClipRect(orientedMarginLeft, orientedMarginTop,
+                                  renderer.getScreenWidth() - orientedMarginLeft - orientedMarginRight,
+                                  renderer.getScreenHeight() - orientedMarginTop - orientedMarginBottom);
+    renderer.setRenderMode(GfxRenderer::GRAYSCALE_BOTH);
+    renderer.beginDualStripTarget(slot.lsb, slot.msb, 0, gh);
+    renderer.clearScreen(0x00);
+    ok = renderPageElementsAbortable(*p, fontId, orientedMarginLeft, orientedMarginTop, !needsTextGrayscale);
+    renderer.endStripTarget();
+    renderer.setRenderMode(GfxRenderer::BW);
+    renderer.clearGrayscaleClipRect();
+    if (!ok) return false;
+    slot.hasGrayPlanes = true;
+  }
+
+  slot.footnotes = p->footnotes;
+  slot.spine = currentSpineIndex;
+  slot.page = targetPage;
+  slot.balanced = balanced;
+  slot.textAA = textAA;
+  slot.bookmarked = slotBookmarked;
+  slot.valid = true;
+  LOG_DBG("ERS", "Shadow compose: spine=%d page=%d gray=%d load=%lums prewarm=%lums bw=%lums gray=%lums total=%lums",
+          slot.spine, slot.page, slot.hasGrayPlanes ? 1 : 0, tLoad - t0, tPrewarm - tLoad, tBw - tPrewarm,
+          millis() - tBw, millis() - t0);
+  return true;
+}
+
+void EpubReaderActivity::maybeComposeShadowSlots(const int orientedMarginTop, const int orientedMarginRight,
+                                                 const int orientedMarginBottom, const int orientedMarginLeft) {
+  // Composing during an in-progress build is safe: build ticks and this tail
+  // both run under RenderLock, and composeShadowSlot only takes pages already
+  // laid out (targetPage < pageCount). Gating on !isBuilding() would disable
+  // the cache for the entire first read of a chapter — the windowed build
+  // follows the reader and doesn't finalize mid-session. The build tick in
+  // loop() skips passes while this holds the lock and resumes right after.
+  if (!section || !ensureShadowBuffers()) return;
+  if (shadowComposeInterrupted()) return;
+
+  const int page = section->currentPage;
+  // Forward first: it is the overwhelmingly likely next request.
+  if (!(shadowNext.valid && shadowNext.spine == currentSpineIndex && shadowNext.page == page + 1)) {
+    composeShadowSlot(shadowNext, page + 1, orientedMarginTop, orientedMarginRight, orientedMarginBottom,
+                      orientedMarginLeft);
+  }
+  if (shadowComposeInterrupted()) return;
+  if (!(shadowPrev.valid && shadowPrev.spine == currentSpineIndex && shadowPrev.page == page - 1)) {
+    composeShadowSlot(shadowPrev, page - 1, orientedMarginTop, orientedMarginRight, orientedMarginBottom,
+                      orientedMarginLeft);
+  }
+}
+
+bool EpubReaderActivity::renderFromShadow(ShadowPageSlot& slot) {
+  // All preconditions verified before any state is touched, so a false return
+  // leaves the world exactly as the slow path expects it.
+  if (!slot.valid || !renderer.hasFrameBuffer()) return false;
+  if (pendingScreenshot || showBookmarkMessage || showDictionaryMessage || pendingSyncSaveError) return false;
+  if (slot.balanced != ReaderUtils::useBalancedReaderRefresh() || slot.textAA != SETTINGS.textAntiAliasing)
+    return false;
+  if (slot.bookmarked != currentPageBookmarked) return false;
+  if (slot.hasGrayPlanes && !renderer.supportsStripGrayscale()) return false;
+
+  const auto t0 = millis();
+  lastPageDisplayCommitted = false;
+  slot.valid = false;  // consumed either way from here on
+
+  memcpy(renderer.getFrameBuffer(), slot.bw, renderer.getBufferSize());
+  currentPageFootnotes = slot.footnotes;
+
+  const bool manualRefreshPending = forcedRefreshPending;
+  if (manualRefreshPending) pagesUntilFullRefresh = 1;
+
+  if (slot.hasGrayPlanes) {
+    // Stage the complete B/W target; on Paper Mono the activation (and the
+    // single visible waveform) happens at displayGrayBuffer() below.
+    renderer.displayGrayscaleBase(ReaderUtils::refreshModeForCycle(pagesUntilFullRefresh));
+  } else {
+    ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh, false);
+  }
+
+  // Same settlement rule as renderContents(): only a frame that actually
+  // reached the panel spends the deghost countdown or a forced refresh.
+  struct RefreshCycleGuard {
+    const GfxRenderer& renderer;
+    int& pagesUntilFullRefresh;
+    bool& forcedRefreshPending;
+    bool manualRefreshPending;
+    bool advanceCycle;
+    ~RefreshCycleGuard() {
+      if (!renderer.displayCommitted()) return;
+      if (advanceCycle) ReaderUtils::advanceRefreshCycle(pagesUntilFullRefresh);
+      if (manualRefreshPending) forcedRefreshPending = false;
+    }
+  } refreshCycleGuard{renderer, pagesUntilFullRefresh, forcedRefreshPending, manualRefreshPending, slot.hasGrayPlanes};
+  lastPageDisplayCommitted = true;
+  // FAT metadata (~20 ms) while the panel is busy, not before the waveform.
+  saveProgressIfNeeded();
+
+  if (slot.hasGrayPlanes) {
+    const int gh = renderer.getDisplayHeight();
+    // Same ordering rule as renderContents(): staging-capable drivers take the
+    // planes before the wait, the fallback tier after it.
+    const bool stageGrayWhileBusy = renderer.supportsBusyGrayscaleStaging();
+    if (stageGrayWhileBusy) {
+      renderer.writeGrayscalePlaneStrip(true, slot.lsb, 0, gh);
+      renderer.writeGrayscalePlaneStrip(false, slot.msb, 0, gh);
+      renderer.prepareGrayscaleTarget();
+    }
+    renderer.waitRefreshComplete();
+    if (!stageGrayWhileBusy) {
+      renderer.writeGrayscalePlaneStrip(true, slot.lsb, 0, gh);
+      renderer.writeGrayscalePlaneStrip(false, slot.msb, 0, gh);
+    }
+    // The driver validates generation + abort internally and drops the whole
+    // frame if input superseded it — same contract as the compose path.
+    renderer.displayGrayBuffer();
+    renderer.cleanupGrayscaleWithFrameBuffer();
+  }
+  lastRenderCompleteMs = millis();
+  LOG_DBG("ERS", "Shadow page turn: spine=%d page=%d gray=%d publish=%lums", currentSpineIndex,
+          section ? section->currentPage : -1, slot.hasGrayPlanes ? 1 : 0, millis() - t0);
+  return true;
 }
 
 ScreenshotInfo EpubReaderActivity::getScreenshotInfo() const {
