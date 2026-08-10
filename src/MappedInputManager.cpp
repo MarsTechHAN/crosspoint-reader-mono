@@ -107,8 +107,32 @@ bool MappedInputManager::wasScreenTapped(int& x, int& y) const {
   float nx = 0.0f;
   float ny = 0.0f;
   if (!gpio.wasTouchTap(nx, ny)) return false;
+  if (suppressNextTouchTap) {
+    // The reader already turned the page at this contact's press edge;
+    // swallow its release so the same touch doesn't act twice.
+    suppressNextTouchTap = false;
+    return false;
+  }
   renderer.tapToLogical(nx, ny, x, y);
   rememberTouchHeldTime();
+  return true;
+}
+
+bool MappedInputManager::wasScreenTouchContact(int& x, int& y) const {
+  // A suppressed contact that ended as a drag (release without a tap) must
+  // disarm here, or the stale flag would swallow the next unrelated tap. A
+  // suppressed contact ending as a TAP stays armed: wasScreenTapped() above
+  // swallows it on this same frame and clears the flag itself.
+  if (suppressNextTouchTap && gpio.wasTouchReleased()) {
+    float tnx = 0.0f;
+    float tny = 0.0f;
+    if (!gpio.wasTouchTap(tnx, tny)) suppressNextTouchTap = false;
+  }
+  float nx = 0.0f;
+  float ny = 0.0f;
+  if (!gpio.wasTouchDown(nx, ny)) return false;
+  suppressNextTouchTap = false;  // new contact, new decision
+  renderer.tapToLogical(nx, ny, x, y);
   return true;
 }
 

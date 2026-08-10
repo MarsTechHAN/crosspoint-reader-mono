@@ -28,6 +28,13 @@ class MappedInputManager {
   // activity hit-testing path as the FT6336. Consumed once by wasScreenTapped.
   void injectDebugTap(int x, int y);
   bool wasScreenTouchDown(int& x, int& y) const;
+  // Press-EDGE contact position in logical coords: true only on the frame a
+  // touch begins. Also disarms a stale tap suppression when the previous
+  // (suppressed) contact ended as a drag. Used by the reader's instant
+  // touch-turn path; pair with suppressTouchTapOnce() so the same contact's
+  // release tap is not classified a second time.
+  bool wasScreenTouchContact(int& x, int& y) const;
+  void suppressTouchTapOnce() const { suppressNextTouchTap = true; }
   bool isScreenTouchHeld(int& x, int& y) const;
   bool wasTapInRect(int x, int y, int width, int height) const;
   bool wasListItemTapped(int& index, int itemCount, int selectedIndex, int listTop, int listHeight,
@@ -84,6 +91,9 @@ class MappedInputManager {
   mutable bool touchHeldOverrideValid = false;
   mutable unsigned long touchHeldOverrideMs = 0;
   mutable unsigned long touchHeldOverrideAt = 0;
+  // Armed by suppressTouchTapOnce(): the reader already acted on this contact
+  // at its press edge, so its release must not classify as a tap too.
+  mutable bool suppressNextTouchTap = false;
   mutable bool debugTapPending = false;
   mutable int debugTapX = 0;
   mutable int debugTapY = 0;

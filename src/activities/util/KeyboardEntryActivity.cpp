@@ -145,9 +145,10 @@ void KeyboardEntryActivity::onEnter() {
   rightLongHandled = false;
   savedCursorPos = 0;
   rightStartCursorPos = 0;
-  touchRouter.reset();
-  touchRouter.holdMs = TOUCH_LONG_PRESS_MS;
-  touchRouter.overrideHoldMs = TOUCH_DEL_LONG_PRESS_MS;
+  touchKeyActive = false;
+  touchKeyLongFired = false;
+  touchKeyInsertLen = 0;
+  touchKeyAlt[0] = '\0';
   interactionsReady = false;
   requestUpdate();
 }
@@ -506,34 +507,79 @@ void KeyboardEntryActivity::loop() {
     cursorMode = false;
     togglePos = false;
     hintVisible = false;
-    touchRouter.reset();
+    touchKeyActive = false;
     requestUpdate();
     return;
   }
 
   if (!cursorMode && interactionsReady) {
-    int tx = 0;
-    int ty = 0;
-    const bool pressedDown = mappedInput.wasScreenTouchDown(tx, ty);
-    int hx = 0;
-    int hy = 0;
-    const bool inContact = mappedInput.isScreenTouchHeld(hx, hy);
-
-    const fui::TouchHoldRouter::Result result =
-        touchRouter.update(interactions, pressedDown, static_cast<int16_t>(tx), static_cast<int16_t>(ty), tapped,
-                           static_cast<int16_t>(tapX), static_cast<int16_t>(tapY), inContact, millis());
-    if (result.event) {
-      syncSelectionToValue(result.event.value);
-      if (activateValue(result.event.value, result.event.longPress)) {
-        requestUpdate();
+    // Keys fire on the press EDGE. Waiting for the release added the finger
+    // dwell (~100 ms) plus a highlight-only repaint — a whole extra waveform —
+    // before the typed character could even start rendering. The release tap
+    // of a fired contact is suppressed so it cannot act twice, and a press
+    // that lands outside every key (the text field) still classifies as a
+    // tap at release for cursor placement above.
+    int px = 0;
+    int py = 0;
+    if (mappedInput.wasScreenTouchContact(px, py)) {
+      const fui::Interaction* hit = nullptr;
+      for (size_t i = 0; i < interactions.count(); i++) {
+        const fui::Interaction& candidate = interactions.data()[i];
+        if (fui::hasState(candidate.state, fui::StateDisabled)) continue;
+        if (!fui::acceptsInput(candidate.inputMask, fui::InputTouch)) continue;
+        if (!candidate.rect.contains(static_cast<int16_t>(px), static_cast<int16_t>(py))) continue;
+        hit = &candidate;
+        break;
       }
-      return;
+      if (hit) {
+        mappedInput.suppressTouchTapOnce();
+        touchKeyActive = true;
+        touchKeyValue = hit->value;
+        touchKeyDownMs = millis();
+        touchKeyLongFired = false;
+        // Capture the alternate output on the layer the press landed on: the
+        // activation below may auto-release shift and switch layers, and the
+        // case-flip alt lives in a static buffer that the next lookup reuses.
+        const char* alt = fui::keyboardAltOutputFor(currentLayout(), hit->value);
+        if (alt) {
+          strncpy(touchKeyAlt, alt, sizeof(touchKeyAlt) - 1);
+          touchKeyAlt[sizeof(touchKeyAlt) - 1] = '\0';
+        } else {
+          touchKeyAlt[0] = '\0';
+        }
+        const size_t lenBefore = text.length();
+        syncSelectionToValue(hit->value);
+        const bool repaint = activateValue(hit->value, false);
+        touchKeyInsertLen = text.length() > lenBefore ? text.length() - lenBefore : 0;
+        if (repaint) requestUpdate();
+        return;
+      }
     }
-    if (result.activeChanged) {
-      requestUpdate();
-    }
-    if (pressedDown || tapped) {
-      return;
+
+    // Hold escalation for the key fired at press: the alternate output
+    // replaces what the press inserted; delete's longer hold clears the field.
+    if (touchKeyActive) {
+      int hx = 0;
+      int hy = 0;
+      if (!mappedInput.isScreenTouchHeld(hx, hy)) {
+        touchKeyActive = false;
+      } else if (!touchKeyLongFired) {
+        const uint16_t threshold =
+            touchKeyValue == fui::QWERTY_KEY_BACKSPACE ? TOUCH_DEL_LONG_PRESS_MS : TOUCH_LONG_PRESS_MS;
+        if (millis() - touchKeyDownMs >= threshold) {
+          touchKeyLongFired = true;
+          if (touchKeyValue == fui::QWERTY_KEY_BACKSPACE) {
+            if (activateValue(touchKeyValue, true)) requestUpdate();
+          } else if (touchKeyAlt[0] != '\0') {
+            if (touchKeyInsertLen > 0 && cursorPos >= touchKeyInsertLen) {
+              text.erase(cursorPos - touchKeyInsertLen, touchKeyInsertLen);
+              cursorPos -= touchKeyInsertLen;
+            }
+            insertUtf8(touchKeyAlt);
+            requestUpdate();
+          }
+        }
+      }
     }
   }
 

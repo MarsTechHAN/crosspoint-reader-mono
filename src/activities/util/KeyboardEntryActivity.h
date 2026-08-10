@@ -74,9 +74,19 @@ class KeyboardEntryActivity : public Activity {
   size_t savedCursorPos = 0;
   size_t rightStartCursorPos = 0;
 
-  // Tap/hold routing (threshold long-press, release swallow, slide re-arm)
-  // lives in the SDK; loop() feeds it the level-triggered touch state.
-  freeink::ui::TouchHoldRouter touchRouter;
+  // Press-edge key activation: keys fire at touch-down (waiting for the
+  // release costs the finger dwell plus a highlight-only repaint before the
+  // character can even start rendering on e-paper). Holding past the
+  // threshold escalates to the key's long-press meaning by replacing what the
+  // press inserted; delete escalates to clear-all.
+  bool touchKeyActive = false;
+  int16_t touchKeyValue = 0;
+  unsigned long touchKeyDownMs = 0;
+  bool touchKeyLongFired = false;
+  size_t touchKeyInsertLen = 0;  // bytes the press inserted, for alt replacement
+  // keyboardAltOutputFor()'s case-flip result lives in a static buffer, so the
+  // alt available at press time is copied here for the escalation to use.
+  char touchKeyAlt[16] = {};
 
   // loop() runs on the main task while render() rebuilds the interaction
   // table on the render task; routing against a half-built table would read

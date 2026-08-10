@@ -82,6 +82,31 @@ inline TouchPageTurn detectTouchPageTurn(GfxRenderer& renderer, const MappedInpu
 
   int x = 0;
   int y = 0;
+
+  // Instant turn at the press EDGE: with long-press behavior OFF there is no
+  // hold semantic to wait out, so a contact beginning inside a page zone acts
+  // immediately instead of at release — the finger's ~100 ms dwell comes off
+  // the page-turn latency. The excluded bands keep every release-classified
+  // edge gesture intact: top 14% (menu swipe), bottom 14% (home swipe), and
+  // the left quarter (back swipe) for the previous zone. The release tap of a
+  // fired contact is suppressed so it cannot act twice.
+  if (SETTINGS.longPressButtonBehavior == SETTINGS.OFF && input.wasScreenTouchContact(x, y)) {
+    const int width = renderer.getScreenWidth();
+    const int height = renderer.getScreenHeight();
+    if (y > height * 14 / 100 && y < height * 86 / 100) {
+      if (x >= width / 3) {
+        input.suppressTouchTapOnce();
+        result.next = true;
+        return result;
+      }
+      if (x >= width / 4) {
+        input.suppressTouchTapOnce();
+        result.prev = true;
+        return result;
+      }
+    }
+  }
+
   if (!input.wasScreenTapped(x, y)) {
     return result;
   }
