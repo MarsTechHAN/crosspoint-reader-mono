@@ -52,6 +52,36 @@ static uint8_t paperMonoPowerButtonHook() {
              ? static_cast<uint8_t>(1u << InputManager::BTN_POWER)
              : 0;
 }
+
+// Input-edge wakeup for the main loop's tail wait. The loop otherwise sleeps
+// delay(10) (or delay(50) once power saving engages), which every button press
+// and touch contact pays as sampling latency. Both buttons and the FT6336 INT
+// line are direct, interrupt-capable GPIOs; the ISR gives this semaphore so
+// the tail wait collapses the instant an edge lands. A dedicated semaphore —
+// NOT a task notification — because requestUpdateAndWait() already blocks the
+// loop task on ulTaskNotifyTake and a spurious ISR give would wake it early.
+static StaticSemaphore_t inputWakeSemaphoreStorage;
+static SemaphoreHandle_t inputWakeSemaphore = nullptr;
+
+static void IRAM_ATTR onInputEdgeIsr() {
+  BaseType_t higherPriorityWoken = pdFALSE;
+  if (inputWakeSemaphore) xSemaphoreGiveFromISR(inputWakeSemaphore, &higherPriorityWoken);
+  portYIELD_FROM_ISR(higherPriorityWoken);
+}
+
+static void attachInputWakeInterrupts() {
+  inputWakeSemaphore = xSemaphoreCreateBinaryStatic(&inputWakeSemaphoreStorage);
+  const auto attachPin = [](const int8_t pin, const int mode) {
+    if (pin >= 0) attachInterrupt(digitalPinToInterrupt(pin), onInputEdgeIsr, mode);
+  };
+  // Both edges for the buttons: DigitalTwoButton emits its short-press event
+  // on release, so the release edge is the one that must not wait out a tick.
+  attachPin(BoardConfig::ACTIVE.input.up, CHANGE);
+  attachPin(BoardConfig::ACTIVE.input.down, CHANGE);
+  // FT6336 INT is held low while a contact is present; the falling edge is
+  // the touch-down the reader's instant turn path acts on.
+  attachPin(BoardConfig::ACTIVE.touch.irq, FALLING);
+}
 #endif
 ActivityManager activityManager(renderer, mappedInputManager);
 FontDecompressor fontDecompressor;
@@ -379,6 +409,10 @@ void setup() {
   silentRebootTarget = 0;
 
   gpio.begin();
+#if FREEINK_DEVICE_PAPERMONO
+  // After gpio.begin(): the pins carry their INPUT_PULLUP modes by now.
+  attachInputWakeInterrupts();
+#endif
   powerManager.begin();
   halTiltSensor.begin();
   halClock.begin();
@@ -806,13 +840,25 @@ void loop() {
     powerManager.setPowerSaving(false);  // Make sure we're at full performance when skipLoopDelay is requested
     yield();                             // Give FreeRTOS a chance to run tasks, but return immediately
   } else {
+    unsigned long tailWaitMs;
     if (millis() - lastActivityTime >= HalPowerManager::IDLE_POWER_SAVING_MS) {
       // If we've been inactive for a while, increase the delay to save power
       powerManager.setPowerSaving(true);  // Lower CPU frequency after extended inactivity
-      delay(50);
+      tailWaitMs = 50;
     } else {
       // Short delay to prevent tight loop while still being responsive
-      delay(10);
+      tailWaitMs = 10;
     }
+#if FREEINK_DEVICE_PAPERMONO
+    // Same sleep budget, but an input-edge ISR collapses it immediately, so a
+    // press is sampled on the next pass instead of up to a full tick later.
+    if (inputWakeSemaphore) {
+      xSemaphoreTake(inputWakeSemaphore, pdMS_TO_TICKS(tailWaitMs));
+    } else {
+      delay(tailWaitMs);
+    }
+#else
+    delay(tailWaitMs);
+#endif
   }
 }
