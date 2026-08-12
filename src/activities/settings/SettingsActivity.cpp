@@ -502,6 +502,9 @@ void SettingsActivity::openFrontlightBrightnessPicker() {
           SETTINGS.frontlightBrightness, 0, 100, 5, 20, StrId::STR_PERCENT_VALUE_FORMAT, false, true,
           StrId::STR_NONE_OPT,
           [](const int value) {
+            // Track the setting, not just the panel: what the user is looking at
+            // IS the brightness, so the stored value must never lag behind it.
+            SETTINGS.frontlightBrightness = static_cast<uint8_t>(value);
             if (!PaperMonoBoard::fadeFrontlightTo(static_cast<uint8_t>(value), 80)) {
               LOG_ERR("SET", "Frontlight live update failed at %d%%", value);
             }

@@ -10,6 +10,7 @@
 #include "util/ButtonNavigator.h"
 
 class GfxRenderer;
+struct Rect;
 
 class IntervalSelectionActivity final : public Activity {
  public:
@@ -59,4 +60,10 @@ class IntervalSelectionActivity final : public Activity {
   void finishFromBack();
   int clampedValue(int candidate) const;
   void drawStepHintLine(int y, StrId labelId, int step);
+  // Bottom action bar, touch devices only. BaseTheme::drawButtonHints() returns
+  // early when gpio.hasTouch(), so on a touch-only board this dialog otherwise
+  // renders with no visible way out and the value the user just dragged is only
+  // committed by an undiscoverable tap on a blank strip. loop() and render()
+  // share these rects so the hit test and the drawn buttons cannot drift apart.
+  void getTouchControlRects(Rect& backRect, Rect& confirmRect) const;
 };

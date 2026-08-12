@@ -11,8 +11,30 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 
+namespace {
+
+constexpr int TOUCH_BUTTON_HEIGHT = 56;
+constexpr int TOUCH_BUTTON_MARGIN = 24;
+constexpr int TOUCH_BUTTON_GAP = 24;
+
+bool contains(const Rect& rect, const int x, const int y) {
+  return x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
+}
+
+}  // namespace
+
 int IntervalSelectionActivity::clampedValue(const int candidate) const {
   return std::clamp(candidate, minValue, maxValue);
+}
+
+void IntervalSelectionActivity::getTouchControlRects(Rect& backRect, Rect& confirmRect) const {
+  const int screenWidth = renderer.getScreenWidth();
+  // Kept inside the strip the tap handler already owned (screen bottom minus 80)
+  // so nothing above the bar changes its meaning on non-touch boards.
+  const int buttonY = renderer.getScreenHeight() - TOUCH_BUTTON_HEIGHT - 12;
+  const int buttonWidth = std::max(1, (screenWidth - TOUCH_BUTTON_MARGIN * 2 - TOUCH_BUTTON_GAP) / 2);
+  backRect = Rect{TOUCH_BUTTON_MARGIN, buttonY, buttonWidth, TOUCH_BUTTON_HEIGHT};
+  confirmRect = Rect{screenWidth - TOUCH_BUTTON_MARGIN - buttonWidth, buttonY, buttonWidth, TOUCH_BUTTON_HEIGHT};
 }
 
 void IntervalSelectionActivity::onEnter() {
@@ -111,15 +133,19 @@ void IntervalSelectionActivity::loop() {
       setValue(minValue + (tx - barX) * range / std::max(1, barWidth - 1));
       return;
     }
-    if (ty >= renderer.getScreenHeight() - 80) {
-      if (tx < renderer.getScreenWidth() / 3) {
-        finishFromBack();
-      } else if (tx > renderer.getScreenWidth() * 2 / 3) {
-        setResult(IntervalResult{static_cast<uint32_t>(value)});
-        finish();
-      }
+    Rect backRect;
+    Rect confirmRect;
+    getTouchControlRects(backRect, confirmRect);
+    if (contains(backRect, tx, ty)) {
+      finishFromBack();
       return;
     }
+    if (contains(confirmRect, tx, ty)) {
+      setResult(IntervalResult{static_cast<uint32_t>(value)});
+      finish();
+      return;
+    }
+    if (ty >= renderer.getScreenHeight() - 80) return;
   }
 
   buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Left}, [this] { adjustValue(-smallStep); });
@@ -172,6 +198,26 @@ void IntervalSelectionActivity::render(RenderLock&&) {
   // doesn't depend on translators preserving a hidden separator.
   drawStepHintLine(barY + 30, StrId::STR_STEP_HINT_FRONT, smallStep);
   drawStepHintLine(barY + 52, StrId::STR_STEP_HINT_SIDE, largeStep);
+
+  // Touch boards get an explicit action bar: GUI.drawButtonHints() draws nothing
+  // when the device has a touchscreen, so without this the only way to commit is
+  // a tap on an unmarked strip and users leave without saving the value they set.
+  if (mappedInput.hasTouch()) {
+    Rect backRect;
+    Rect confirmRect;
+    getTouchControlRects(backRect, confirmRect);
+    const int lineHeight = renderer.getLineHeight(UI_12_FONT_ID);
+    auto drawTouchButton = [&](const Rect& rect, const char* label) {
+      renderer.fillRectDither(rect.x, rect.y, rect.width, rect.height, Color::White);
+      renderer.drawRect(rect.x, rect.y, rect.width, rect.height, true);
+      const int textWidth = renderer.getTextWidth(UI_12_FONT_ID, label, EpdFontFamily::BOLD);
+      const int textX = rect.x + (rect.width - textWidth) / 2;
+      const int textY = rect.y + (rect.height - lineHeight) / 2;
+      renderer.drawText(UI_12_FONT_ID, textX, textY, label, true, EpdFontFamily::BOLD);
+    };
+    drawTouchButton(backRect, tr(STR_BACK));
+    drawTouchButton(confirmRect, tr(STR_SELECT));
+  }
 
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), "-", "+");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
