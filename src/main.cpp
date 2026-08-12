@@ -824,7 +824,12 @@ void loop() {
         const uint32_t bufferSize = display.getBufferSize();
         logSerial.printf("SCREENSHOT_START:%d\n", bufferSize);
         uint8_t* buf = display.getFrameBuffer();
-        logSerial.write(buf, bufferSize);
+        // Chunked: the CDC TX timeout is 1 ms (see setTxTimeoutMs below), so a
+        // single 64 KB write drops everything past the first endpoint FIFO fill.
+        for (uint32_t sent = 0; sent < bufferSize; sent += 64) {
+          logSerial.write(buf + sent, std::min<uint32_t>(64, bufferSize - sent));
+          logSerial.flush();
+        }
         logSerial.printf("SCREENSHOT_END\n");
       } else if (cmd.startsWith("TAP ")) {
         int x = -1;
