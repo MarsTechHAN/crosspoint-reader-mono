@@ -154,26 +154,13 @@ EpdFontFamily notosans18FontFamily(&notosans18RegularFont, &notosans18BoldFont, 
 EpdFont smallFont(&notosans_8_regular);
 EpdFontFamily smallFontFamily(&smallFont);
 
-// UI chrome renders in the bold cut at both weights: the bold face fills the
-// REGULAR slot as well as the BOLD one.
-//
-// E-ink's soft particle edges eat stroke weight, and Ubuntu Regular at 10/12 px
-// comes out noticeably lighter on the panel than it looks on a monitor -- next
-// to the book face it reads washed out. Doing it at registration rather than at
-// the call sites keeps measurement and drawing consistent for free: getTextWidth
-// and truncatedText resolve through this same family, so every truncation and
-// centring stays correct without touching the ~130 places that name a style.
-// Call sites that already ask for BOLD (Lyra's list titles) are unaffected.
-//
-// SMALL_FONT_ID keeps its regular weight -- notosans_8 ships no bold cut -- which
-// leaves the size contrast between a UI_12 title and a SMALL subtitle intact.
 EpdFont ui10RegularFont(&ubuntu_10_regular);
 EpdFont ui10BoldFont(&ubuntu_10_bold);
-EpdFontFamily ui10FontFamily(&ui10BoldFont, &ui10BoldFont);
+EpdFontFamily ui10FontFamily(&ui10RegularFont, &ui10BoldFont);
 
 EpdFont ui12RegularFont(&ubuntu_12_regular);
 EpdFont ui12BoldFont(&ubuntu_12_bold);
-EpdFontFamily ui12FontFamily(&ui12BoldFont, &ui12BoldFont);
+EpdFontFamily ui12FontFamily(&ui12RegularFont, &ui12BoldFont);
 
 // measurement of power button press duration calibration value
 unsigned long t1 = 0;
@@ -457,6 +444,9 @@ void setupDisplayAndFonts(bool seamless = false) {
     for (const uint8_t pointSize : FlashTtfFont::POINT_SIZES) {
       renderer.insertFont(builtinCjkFontId(pointSize), EpdFontFamily(builtinCjkFont.font(pointSize)));
     }
+    for (const uint8_t pointSize : FlashTtfFont::BOLD_POINT_SIZES) {
+      renderer.insertFont(builtinCjkBoldFontId(pointSize), EpdFontFamily(builtinCjkFont.boldFont(pointSize)));
+    }
 
     // LXGW WenKai's Han em box appears optically smaller than the bundled
     // Latin faces at the same nominal point size. Route every built-in CJK
@@ -468,9 +458,14 @@ void setupDisplayAndFonts(bool seamless = false) {
     // are the smallest in the build (Ubuntu 10/12 pt, Noto Sans 8 pt), so the
     // stroke pitch there lands below what this panel resolves cleanly. Reader
     // body text keeps N+4 — it is already large and user-adjustable.
-    renderer.setBuiltinFallbackFont(SMALL_FONT_ID, BUILTIN_CJK_14_FONT_ID);
-    renderer.setBuiltinFallbackFont(UI_10_FONT_ID, BUILTIN_CJK_16_FONT_ID);
-    renderer.setBuiltinFallbackFont(UI_12_FONT_ID, BUILTIN_CJK_18_FONT_ID);
+    // The three UI fallbacks take the synthetic-bold cut. LXGW WenKai has one
+    // weight, and at these sizes its strokes sit near what the panel resolves;
+    // e-ink's particle spread rounds them off further, so unweighted Han labels
+    // read washed out beside the Latin faces they share a row with. Bold and
+    // regular report identical metrics, so this changes no measurement.
+    renderer.setBuiltinFallbackFont(SMALL_FONT_ID, BUILTIN_CJK_BOLD_14_FONT_ID);
+    renderer.setBuiltinFallbackFont(UI_10_FONT_ID, BUILTIN_CJK_BOLD_16_FONT_ID);
+    renderer.setBuiltinFallbackFont(UI_12_FONT_ID, BUILTIN_CJK_BOLD_18_FONT_ID);
 #ifndef OMIT_FONTS
     renderer.setBuiltinFallbackFont(NOTOSERIF_12_FONT_ID, BUILTIN_CJK_16_FONT_ID);
     renderer.setBuiltinFallbackFont(NOTOSERIF_16_FONT_ID, BUILTIN_CJK_20_FONT_ID);
