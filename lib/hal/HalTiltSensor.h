@@ -52,6 +52,17 @@ class HalTiltSensor {
   unsigned long _lastFaceDownPollMs = 0;
   unsigned long _faceDownSinceMs = 0;
 
+  // Raise-to-wake pose gate (see isRaisedPose). Measured in the same wearable
+  // frame the BMI270's feature engine is remapped into: forward tilt = -ax,
+  // roll = -ay, outward screen normal = -az. A measured reading hold is
+  // 0.63..0.76 g of forward tilt; lying flat is 0.005 g, so the two are far
+  // apart and the minimum can sit low enough to accept a lazy pickup.
+  static constexpr uint8_t RAISED_POSE_SAMPLES = 8;
+  static constexpr unsigned long RAISED_POSE_SAMPLE_MS = 20;
+  static constexpr float RAISED_POSE_MIN_FORWARD_G = 0.30f;  // ~17 deg -- the bound the sensor lacks
+  static constexpr float RAISED_POSE_MAX_FORWARD_G = 0.97f;  // ~75 deg, mirrors max_tilt_pu
+  static constexpr float RAISED_POSE_MAX_ROLL_G = 0.50f;     // ~30 deg, mirrors max_tilt_lr/ll
+
   bool readGyro(float& gx, float& gy, float& gz) const;
   bool ensureStarted();
 
@@ -81,6 +92,20 @@ class HalTiltSensor {
   // the host goes to sleep (instead of deepSleep()). The INT line is wired to
   // the PMIC's GPIO4 on Paper Mono.
   bool armMotionWake();
+
+  // True when the device is right now being held at a reading tilt.
+  //
+  // The BMI270's wrist-wear feature only has *maximum* tilt limits -- Bosch's
+  // bmi2_defs.h documents max_tilt_pd/pu/lr/ll and no minimum -- so lying flat
+  // is inside its acceptance window. Pair that with the attitude-change gate a
+  // shake also satisfies and "shake the device, set it down flat" fires the
+  // gesture as reliably as a real pickup. This supplies the minimum the sensor
+  // cannot express, so the wake path can reject that case.
+  //
+  // Averages a short burst rather than trusting one sample: a pickup may still
+  // be moving when this runs, and a single reading then carries the motion as
+  // well as gravity.
+  bool isRaisedPose();
 
   // Returns true once per tilt-forward gesture (next page direction).
   // Consumed on read — subsequent calls return false until next gesture.

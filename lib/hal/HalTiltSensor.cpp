@@ -37,7 +37,10 @@ bool HalTiltSensor::ensureStarted() {
     return false;
   }
   _started = true;
-  LOG_INF("GYR", "SDK IMU initialized");
+  // warm=1 means the sensor was still configured when we got here, i.e. it kept
+  // its rail across the reset. After a PMIC hard shutdown that answers whether
+  // raise-to-wake is even physically possible on this board.
+  LOG_INF("GYR", "SDK IMU initialized (warm=%d)", _sdkImu.warmStarted() ? 1 : 0);
   return true;
 }
 
@@ -70,6 +73,42 @@ bool HalTiltSensor::armMotionWake() {
   _inTilt = false;
   _isAwake = false;
   return true;
+}
+
+bool HalTiltSensor::isRaisedPose() {
+  if (!ensureStarted()) {
+    return false;
+  }
+
+  // Wearable frame per the axis remap the wrist feature runs in:
+  // (X_w, Y_w, Z_w) = (-Y, -X, -Z). Accumulate in that frame directly so the
+  // thresholds compare against Bosch's own tilt fields without a second
+  // translation step.
+  float forward = 0.0f, roll = 0.0f, normal = 0.0f;
+  uint8_t got = 0;
+  for (uint8_t i = 0; i < RAISED_POSE_SAMPLES; ++i) {
+    Imu::Sample sample;
+    if (_sdkImu.read(sample)) {
+      forward += -sample.ax;
+      roll += -sample.ay;
+      normal += -sample.az;
+      ++got;
+    }
+    delay(RAISED_POSE_SAMPLE_MS);
+  }
+  if (got == 0) {
+    LOG_ERR("GYR", "Raise pose: no IMU samples");
+    return false;
+  }
+
+  forward /= got;
+  roll /= got;
+  normal /= got;
+  const bool raised = normal > 0.0f && forward >= RAISED_POSE_MIN_FORWARD_G &&
+                      forward <= RAISED_POSE_MAX_FORWARD_G && fabsf(roll) <= RAISED_POSE_MAX_ROLL_G;
+  LOG_INF("GYR", "Raise pose: fwd=%.2fg roll=%.2fg normal=%.2fg -> %s", forward, roll, normal,
+          raised ? "raised" : "not raised");
+  return raised;
 }
 
 bool HalTiltSensor::deepSleep() {

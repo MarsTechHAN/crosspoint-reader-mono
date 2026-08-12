@@ -113,6 +113,41 @@ void writePin(uint8_t pin, bool high) {
   write16(IOE_REG_OUT, s_output);
 }
 
+// Block until the IMU's motion interrupt has been quiet long enough to arm a
+// rising-edge wake on it, or give up.
+//
+// INT1 is active-HIGH push-pull, so "quiet" means the line reads LOW. Sleep is
+// normally entered while the device is still in the user's hand, and BMI270
+// any-motion is non-latched: the line is held asserted for as long as motion
+// exceeds the threshold. Arming against that guarantees an immediate wake --
+// either the line is already asserted, or the settling motion of being set down
+// supplies the edge a moment later. So wait for a continuous quiet window
+// rather than sampling once. Returning false costs raise-to-wake for this
+// sleep cycle, which is a far better failure than a power-off/power-on loop.
+bool waitForMotionIdle() {
+  constexpr uint8_t MOTION_WAKE_GPIO = 4;
+  constexpr uint32_t QUIET_MS = 400;     // continuous idle required before arming
+  constexpr uint32_t TIMEOUT_MS = 2500;  // total budget; screen is already blank
+  const uint32_t deadline = millis() + TIMEOUT_MS;
+  uint32_t quietSince = 0;
+  while (millis() < deadline) {
+    bool high = false;
+    if (!freeink::m5pm1::readGpioLevel(MOTION_WAKE_GPIO, &high)) return false;
+    const uint32_t now = millis();
+    // INT1 is active-LOW, so idle is the pulled-up HIGH level. Arming while the
+    // line is still asserted would leave the PMIC waiting for a falling edge
+    // that has already happened.
+    if (!high) {
+      quietSince = 0;
+    } else {
+      if (quietSince == 0) quietSince = now;
+      if (now - quietSince >= QUIET_MS) return true;
+    }
+    delay(20);
+  }
+  return false;
+}
+
 bool writeFrontlightDuty(uint8_t percent) {
   percent = std::min<uint8_t>(percent, 100);
   const uint16_t duty12 = perceptualDuty12(percent);
@@ -238,11 +273,52 @@ bool wokeByPowerButton() { return s_wokeByPowerButton; }
 bool wokeByMotion() { return (s_wakeSource & freeink::m5pm1::WAKE_EXT_GPIO) != 0; }
 
 bool setMotionWake(const bool enable) {
-  // IMU INT1 -> PM_G4, configured push-pull active-high by the IMU arm path,
-  // so the wake edge is rising. G4 shares its interrupt line with G3 only;
-  // the RTC's /IRQ on G0 may be armed independently later.
+  // IMU INT1 -> PM_G4, matching M5Stack's own M5PaperMono-UserDemo
+  // (app_sleep_wake.cpp, enterImuWakeShutdown): INT1 push-pull active-LOW, G4 an
+  // input with a pull-up, wake on the FALLING edge.
+  //
+  // The part that actually makes this work is the rail hold. The BMI270 sits on
+  // the PM1's 3.3V LDO, and a plain SYS_CMD shutdown drops that rail: the
+  // sensor's still-driven INT1 pin glitches as its supply decays and the PMIC
+  // reads it as a wake. Measured, that self-wake needs BOTH an enabled INT1
+  // output driver and a running accelerometer -- polarity, drive type and
+  // feature mapping made no difference, which is why swapping edges never fixed
+  // it. Holding the LDO keeps the sensor powered so there is no decay to glitch
+  // on, and is also the only way the sensor can detect anything while the host
+  // is off.
+  //
+  // G4 shares its interrupt line with G3 only; the RTC's /IRQ on G0 may be armed
+  // independently later.
   constexpr uint8_t MOTION_WAKE_GPIO = 4;
-  return freeink::m5pm1::setGpioWake(MOTION_WAKE_GPIO, /*risingEdge=*/true, enable);
+  namespace pm1 = freeink::m5pm1;
+
+  if (!enable) {
+    const bool ok = pm1::setGpioWake(MOTION_WAKE_GPIO, /*risingEdge=*/false, false);
+    pm1::setGpioIrqMasked(MOTION_WAKE_GPIO, true);
+    // Drop the hold so an ordinary sleep powers the rail down: holding it costs
+    // standby current for a sensor nobody is listening to.
+    pm1::setLdoPowerHold(false);
+    return ok;
+  }
+
+  // The sensor cannot arm on a dead rail, and LedManager owns this bit lazily,
+  // so claim it before touching the IMU.
+  if (!pm1::setRgbRail(true)) return false;
+
+  // A GPIO edge latched before shutdown is indistinguishable from a real one
+  // afterwards. Clear the status and leave G4 as the only unmasked source.
+  pm1::clearGpioIrq();
+  pm1::clearSysIrq();
+  for (uint8_t gpio = 0; gpio < 4; ++gpio) pm1::setGpioIrqMasked(gpio, true);
+  pm1::setGpioIrqMasked(MOTION_WAKE_GPIO, false);
+
+  if (!waitForMotionIdle()) return false;
+  pm1::clearWakeSource();
+  if (!pm1::setGpioWake(MOTION_WAKE_GPIO, /*risingEdge=*/false, true)) return false;
+  if (!pm1::setLdoPowerHold(true)) return false;
+
+  // Arming re-enabled the edge detector; make sure nothing asserted in between.
+  return waitForMotionIdle();
 }
 
 uint8_t powerButtonConfig() { return s_powerButtonConfig; }
@@ -283,8 +359,40 @@ void disableSd() { writePin(IOE_SD_POWER, false); }
 
 void powerDownForSleep() {
   fadeFrontlightTo(0, 260);
+  // The fade above is 260 ms of PWM on M5PM1 GPIO3, and G3 shares its wake
+  // interrupt line with G4 (the IMU's motion INT). Leaving the pin toggling
+  // would hand that shared line a wake edge the moment raise-to-wake is armed.
+  // Park it as a plain GPIO driven low; the shutdown that follows makes
+  // restoring the PWM routing the next boot's job.
+  // Stage the GPIO level and direction while PWM0 still owns the pin, then
+  // release the alternate function last, so the pin goes straight from driven
+  // PWM to driven low with no floating window in between.
+  freeink::m5pm1::updateReg(freeink::m5pm1::REG_GPIO_OUT, PMIC_GPIO3, 0);
+  freeink::m5pm1::updateReg(freeink::m5pm1::REG_GPIO_MODE, 0, PMIC_GPIO3);
+  freeink::m5pm1::updateReg(freeink::m5pm1::REG_GPIO_FUNC0, PMIC_GPIO3_FUNC_MASK, 0);
   disableTouch();
   disableSd();
+}
+
+void powerDownRailsForShutdown() {
+  namespace pm1 = freeink::m5pm1;
+  // PWR_CFG lives in the PMIC, which stays powered across a SYS_CMD shutdown,
+  // so whatever is enabled here keeps drawing for the whole time the device is
+  // "off" -- and with raise-to-wake armed that can be days.
+  //
+  // BOOST_EN is the frontlight's step-up converter. applyBootPowerPolicy()
+  // turns it on at every boot and nothing turns it off, so it has been idling
+  // through every sleep with its output already faded to zero: a switching
+  // regulator burning quiescent current into no load. LED_EN_LEVEL is the
+  // PMIC's own status-LED output. M5Stack's own sleep path clears both
+  // (M5PaperMono-UserDemo, app_sleep_wake.cpp: "PM1 red LED off" / "PM1 boost
+  // off"), and applyBootPowerPolicy() restores BOOST_EN on the way back up.
+  //
+  // CHG_EN and DCDC_EN are deliberately untouched: DCDC is the system 3.3V and
+  // CHG is what charges the battery while the device is off. LDO_EN is
+  // untouched too -- clearing it mid-run kills the BMI270 on a shared I2C bus,
+  // and setMotionWake() already owns whether its hold survives the shutdown.
+  pm1::updateReg(pm1::REG_PWR_CFG, pm1::BOOST_EN | pm1::LED_EN_LEVEL, 0);
 }
 
 void powerDownEpdForDeepSleepFallback() {

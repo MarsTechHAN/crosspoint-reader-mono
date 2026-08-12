@@ -28,6 +28,10 @@ void disableTouch();
 void enableSd();
 void disableSd();
 void powerDownForSleep();
+// Clears the PMIC rails that would otherwise keep drawing current for the whole
+// time the system is off. Call last, after the panel is asleep and after any
+// wake source is armed -- it touches PWR_CFG only, never a GPIO.
+void powerDownRailsForShutdown();
 void powerDownEpdForDeepSleepFallback();
 
 }  // namespace PaperMonoBoard
